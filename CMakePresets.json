@@ -1,0 +1,43 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "msvc-release",
+            "displayName": "MSVC Release",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_COMPILER": "cl",
+                "CMAKE_CXX_COMPILER": "cl"
+            },
+            "environment": {
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            }
+        },
+        {
+            "name": "msvc-debug",
+            "displayName": "MSVC Debug",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_COMPILER": "cl",
+                "CMAKE_CXX_COMPILER": "cl"
+            },
+            "environment": {
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "msvc-release",
+            "configurePreset": "msvc-release"
+        },
+        {
+            "name": "msvc-debug",
+            "configurePreset": "msvc-debug"
+        }
+    ]
+}

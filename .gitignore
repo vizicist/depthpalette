@@ -1,0 +1,15 @@
+build/
+build-debug/
+.cache/
+.claude/
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.log
+*.un~
+build_log.txt
+git_out.txt
+filter.jq

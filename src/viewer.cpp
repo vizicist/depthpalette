@@ -115,6 +115,31 @@ void ImageViewer::update(const uint8_t* planarRgb, int imgWidth, int imgHeight) 
     blitBgr(bgrBuf_.data(), imgWidth, imgHeight);
 }
 
+void ImageViewer::updateSingle(const uint8_t* bgr, int imgW, int imgH) {
+    if (!hwnd_ || !running_) return;
+
+    RECT clientRect;
+    GetClientRect(hwnd_, &clientRect);
+    int clientW = clientRect.right;
+    int clientH = clientRect.bottom;
+
+    HDC hdc = GetDC(hwnd_);
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 24;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    bmi.bmiHeader.biWidth = imgW;
+    bmi.bmiHeader.biHeight = -imgH;  // top-down
+
+    StretchDIBits(hdc, 0, 0, clientW, clientH,
+                  0, 0, imgW, imgH,
+                  bgr, &bmi, DIB_RGB_COLORS, SRCCOPY);
+
+    ReleaseDC(hwnd_, hdc);
+}
+
 void ImageViewer::updateSideBySide(const uint8_t* leftBgr, int leftW, int leftH,
                                     const uint8_t* rightBgr, int rightW, int rightH) {
     if (!hwnd_ || !running_) return;

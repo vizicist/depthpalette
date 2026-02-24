@@ -45,13 +45,21 @@ struct UnionFind {
 struct BlobInfo {
     int minX, minY, maxX, maxY;
     int pixelCount;
+    uint64_t depthSum;      // accumulator for average calculation
+    float avgDepthMm;       // average depth across blob pixels
+    uint16_t maxDepthMm;    // maximum depth in this blob
+    int maxDepthX, maxDepthY; // pixel position of the maximum depth
 };
 
 // Detect connected components of black pixels (val == 0) in a packed BGR image,
 // then draw green rectangles around blobs whose pixel count <= maxBlobPixels.
 // Operates in-place on the BGR buffer.
-// Returns the number of blobs that were drawn.
-inline int detectAndDrawBlobs(uint8_t* bgr, int width, int height, int maxBlobPixels) {
+// If depthMm is provided, computes per-blob depth statistics.
+// Returns the filtered blobs (those that were drawn).
+inline std::vector<BlobInfo> detectAndDrawBlobs(uint8_t* bgr, int width, int height,
+                                                 int maxBlobPixels,
+                                                 const uint16_t* depthMm = nullptr,
+                                                 int minBlobPixels = 20) {
     int totalPixels = width * height;
 
     // Label buffer — 0 means unlabeled / background (white pixel)
@@ -92,10 +100,9 @@ inline int detectAndDrawBlobs(uint8_t* bgr, int width, int height, int maxBlobPi
         }
     }
 
-    if (nextLabel <= 1) return 0;  // no foreground pixels at all
+    if (nextLabel <= 1) return {};  // no foreground pixels at all
 
-    // ---- Pass 2: resolve labels and compute bounding boxes ----
-    // Map root labels -> contiguous blob index
+    // ---- Pass 2: resolve labels, compute bounding boxes and depth stats ----
     std::vector<int> rootToBlob(nextLabel, -1);
     std::vector<BlobInfo> blobs;
 
@@ -112,7 +119,7 @@ inline int detectAndDrawBlobs(uint8_t* bgr, int width, int height, int maxBlobPi
             if (blobIdx < 0) {
                 blobIdx = static_cast<int>(blobs.size());
                 rootToBlob[root] = blobIdx;
-                blobs.push_back({x, y, x, y, 0});
+                blobs.push_back({x, y, x, y, 0, 0, 0.0f, 0, 0, 0});
             }
 
             BlobInfo& b = blobs[blobIdx];
@@ -121,12 +128,22 @@ inline int detectAndDrawBlobs(uint8_t* bgr, int width, int height, int maxBlobPi
             if (y < b.minY) b.minY = y;
             if (y > b.maxY) b.maxY = y;
             b.pixelCount++;
+
+            if (depthMm) {
+                uint16_t d = depthMm[idx];
+                b.depthSum += d;
+                if (d > b.maxDepthMm) {
+                    b.maxDepthMm = d;
+                    b.maxDepthX = x;
+                    b.maxDepthY = y;
+                }
+            }
         }
     }
 
-    // ---- Draw rectangles around small blobs ----
-    int drawnCount = 0;
-    int minBlobPixels = 20;  // ignore tiny noise blobs
+    // ---- Filter, compute averages, draw rectangles ----
+    std::vector<BlobInfo> result;
+    // minBlobPixels is now a function parameter (default 20)
 
     auto drawHLine = [&](int x0, int x1, int y) {
         if (y < 0 || y >= height) return;
@@ -152,26 +169,31 @@ inline int detectAndDrawBlobs(uint8_t* bgr, int width, int height, int maxBlobPi
         }
     };
 
-    for (const auto& b : blobs) {
+    for (auto& b : blobs) {
         if (b.pixelCount < minBlobPixels) continue;   // skip noise
         if (b.pixelCount > maxBlobPixels) continue;    // skip large blobs
+
+        // Compute average depth
+        if (depthMm && b.pixelCount > 0) {
+            b.avgDepthMm = static_cast<float>(b.depthSum) / b.pixelCount;
+        }
+
         // Draw 2px thick rectangle with 2px margin for visibility
         int rx0 = b.minX - 2;
         int ry0 = b.minY - 2;
         int rx1 = b.maxX + 2;
         int ry1 = b.maxY + 2;
-        // Outer rectangle
         drawHLine(rx0, rx1, ry0);
         drawHLine(rx0, rx1, ry1);
         drawVLine(rx0, ry0, ry1);
         drawVLine(rx1, ry0, ry1);
-        // Inner rectangle (2px thickness)
         drawHLine(rx0 + 1, rx1 - 1, ry0 + 1);
         drawHLine(rx0 + 1, rx1 - 1, ry1 - 1);
         drawVLine(rx0 + 1, ry0 + 1, ry1 - 1);
         drawVLine(rx1 - 1, ry0 + 1, ry1 - 1);
-        drawnCount++;
+
+        result.push_back(b);
     }
 
-    return drawnCount;
+    return result;
 }

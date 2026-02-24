@@ -23,6 +23,9 @@ public:
     // Display a planar RGB frame (R plane, G plane, B plane — depthai format).
     void update(const uint8_t* planarRgb, int imgWidth, int imgHeight);
 
+    // Display a single packed BGR image (top-down), stretched to fill the window.
+    void updateSingle(const uint8_t* bgr, int imgW, int imgH);
+
     // Display two packed BGR images (top-down) side by side.
     void updateSideBySide(const uint8_t* leftBgr, int leftW, int leftH,
                           const uint8_t* rightBgr, int rightW, int rightH);

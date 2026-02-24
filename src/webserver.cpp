@@ -17,7 +17,8 @@ static const char* kIndexHtml = R"HTML(<!DOCTYPE html>
          margin: 0; display: flex; flex-direction: column; align-items: center; }
   h1 { margin: 16px 0 8px; }
   .images { display: flex; gap: 8px; margin: 8px 0; }
-  .images img { border: 1px solid #444; max-width: 640px; height: auto; }
+  .images img { border: 1px solid #444; max-width: 640px; height: auto; transform: scaleX(-1); }
+  .images canvas { border: 1px solid #444; max-width: 640px; height: auto; transform: scaleX(-1); }
   .controls { background: #16213e; padding: 16px 24px; border-radius: 8px;
               display: flex; align-items: center; gap: 16px; margin: 8px 0;
               flex-wrap: wrap; }
@@ -42,9 +43,9 @@ static const char* kIndexHtml = R"HTML(<!DOCTYPE html>
 <h1>DepthPalette</h1>
 <div class="controls">
   <label>Threshold:
-    <input id="threshSlider" class="slider" type="range" min="200" max="8000" step="50" value="1500">
+    <input id="threshSlider" class="slider" type="range" min="200" max="2000" step="50" value="550">
   </label>
-  <span id="threshVal" class="val">1500 mm</span>
+  <span id="threshVal" class="val">550 mm</span>
   <div class="sep"></div>
   <div class="toggle">
     <label class="switch">
@@ -57,12 +58,25 @@ static const char* kIndexHtml = R"HTML(<!DOCTYPE html>
     <input id="blobSlider" class="slider" type="range" min="100" max="50000" step="100" value="5000">
   </label>
   <span id="blobVal" class="val">5000 px</span>
+  <label>Min blob size:
+    <input id="minBlobSlider" class="slider" type="range" min="1" max="1000" step="1" value="20">
+  </label>
+  <span id="minBlobVal" class="val">20 px</span>
+  <div class="sep"></div>
+  <div class="toggle">
+    <label class="switch">
+      <input id="dotsToggle" type="checkbox">
+      <span class="slider-track"></span>
+    </label>
+    <span>Dots View</span>
+  </div>
   <div class="sep"></div>
   <span id="fpsDisplay" class="fps">-- fps</span>
 </div>
 <div class="images">
   <img id="colorImg" alt="Color">
   <img id="depthImg" alt="Depth (B/W)">
+  <canvas id="dotsCanvas" style="display:none"></canvas>
 </div>
 <script>
   const threshSlider = document.getElementById('threshSlider');
@@ -70,14 +84,56 @@ static const char* kIndexHtml = R"HTML(<!DOCTYPE html>
   const blobToggle = document.getElementById('blobToggle');
   const blobSlider = document.getElementById('blobSlider');
   const blobVal = document.getElementById('blobVal');
+  const minBlobSlider = document.getElementById('minBlobSlider');
+  const minBlobVal = document.getElementById('minBlobVal');
   const colorImg = document.getElementById('colorImg');
   const depthImg = document.getElementById('depthImg');
+  const dotsToggle = document.getElementById('dotsToggle');
+  const dotsCanvas = document.getElementById('dotsCanvas');
+  const dotsCtx = dotsCanvas.getContext('2d');
+
+  let dotsMode = false;
+  let evtSource = null;
 
   function refreshImages() {
     const t = Date.now();
     colorImg.src = '/color.bmp?t=' + t;
-    depthImg.src = '/frame.bmp?t=' + t;
+    if (!dotsMode) depthImg.src = '/frame.bmp?t=' + t;
   }
+
+  function drawDots(j) {
+    if (j.w > 0 && j.h > 0) {
+      dotsCanvas.width = j.w;
+      dotsCanvas.height = j.h;
+    }
+    dotsCtx.fillStyle = '#000';
+    dotsCtx.fillRect(0, 0, dotsCanvas.width, dotsCanvas.height);
+    if (j.blobs) {
+      for (const b of j.blobs) {
+        const r = Math.max(4, Math.min(20, Math.sqrt(b.px) / 2));
+        dotsCtx.beginPath();
+        dotsCtx.arc(b.cx, b.cy, r, 0, 2 * Math.PI);
+        dotsCtx.fillStyle = '#0f0';
+        dotsCtx.fill();
+      }
+    }
+  }
+
+  dotsToggle.addEventListener('change', function() {
+    dotsMode = dotsToggle.checked;
+    if (dotsMode) {
+      depthImg.style.display = 'none';
+      dotsCanvas.style.display = '';
+      evtSource = new EventSource('/events');
+      evtSource.onmessage = function(e) {
+        drawDots(JSON.parse(e.data));
+      };
+    } else {
+      depthImg.style.display = '';
+      dotsCanvas.style.display = 'none';
+      if (evtSource) { evtSource.close(); evtSource = null; }
+    }
+  });
 
   threshSlider.addEventListener('input', function() {
     const v = threshSlider.value;
@@ -95,6 +151,12 @@ static const char* kIndexHtml = R"HTML(<!DOCTYPE html>
     fetch('/blobdetect?maxsize=' + v);
   });
 
+  minBlobSlider.addEventListener('input', function() {
+    const v = minBlobSlider.value;
+    minBlobVal.textContent = v + ' px';
+    fetch('/blobdetect?minsize=' + v);
+  });
+
   // Fetch current settings on load
   fetch('/threshold')
     .then(r => r.json())
@@ -106,6 +168,8 @@ static const char* kIndexHtml = R"HTML(<!DOCTYPE html>
       blobToggle.checked = j.enabled;
       blobSlider.value = j.maxsize;
       blobVal.textContent = j.maxsize + ' px';
+      minBlobSlider.value = j.minsize;
+      minBlobVal.textContent = j.minsize + ' px';
     });
 
   const fpsDisplay = document.getElementById('fpsDisplay');
@@ -129,11 +193,15 @@ static const char* kIndexHtml = R"HTML(<!DOCTYPE html>
 WebServer::WebServer(std::atomic<int>& thresholdMm,
                      std::atomic<bool>& blobDetectEnabled,
                      std::atomic<int>& maxBlobPixels,
-                     std::atomic<int>& fpsTenths)
+                     std::atomic<int>& minBlobPixels,
+                     std::atomic<int>& fpsTenths,
+                     bool colorEnabled)
     : thresholdMm_(thresholdMm)
     , blobDetectEnabled_(blobDetectEnabled)
     , maxBlobPixels_(maxBlobPixels)
-    , fpsTenths_(fpsTenths) {}
+    , minBlobPixels_(minBlobPixels)
+    , fpsTenths_(fpsTenths)
+    , colorEnabled_(colorEnabled) {}
 
 WebServer::~WebServer() {
     stop();
@@ -147,6 +215,7 @@ void WebServer::start() {
 
 void WebServer::stop() {
     running_ = false;
+    blobsCv_.notify_all();  // wake any blocked SSE handlers
     if (thread_.joinable()) thread_.join();
 }
 
@@ -166,6 +235,15 @@ void WebServer::updateDepthFrame(const uint8_t* bgr, int width, int height) {
     std::memcpy(depthBgr_.data(), bgr, sz);
     depthW_ = width;
     depthH_ = height;
+}
+
+void WebServer::updateBlobs(const std::string& json) {
+    {
+        std::lock_guard<std::mutex> lock(frameMtx_);
+        blobsJson_ = json;
+        blobsSeq_++;
+    }
+    blobsCv_.notify_all();
 }
 
 std::vector<uint8_t> WebServer::makeBmp(const uint8_t* bgr, int width, int height) {
@@ -212,9 +290,22 @@ std::vector<uint8_t> WebServer::makeBmp(const uint8_t* bgr, int width, int heigh
 void WebServer::run() {
     httplib::Server svr;
 
-    // GET / — HTML page
-    svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content(kIndexHtml, "text/html");
+    // GET / — HTML page (hide color image if color stream is disabled)
+    svr.Get("/", [this](const httplib::Request&, httplib::Response& res) {
+        std::string html = kIndexHtml;
+        if (!colorEnabled_) {
+            // Hide the color image element
+            std::string target = "<img id=\"colorImg\" alt=\"Color\">";
+            auto pos = html.find(target);
+            if (pos != std::string::npos)
+                html.replace(pos, target.size(), "");
+            // Remove the color refresh line
+            std::string colorRefresh = "colorImg.src = '/color.bmp?t=' + t;";
+            pos = html.find(colorRefresh);
+            if (pos != std::string::npos)
+                html.replace(pos, colorRefresh.size(), "");
+        }
+        res.set_content(html, "text/html");
     });
 
     // GET /frame.bmp — thresholded depth frame
@@ -280,10 +371,18 @@ void WebServer::run() {
             if (val > 100000) val = 100000;
             maxBlobPixels_.store(val);
         }
+        if (req.has_param("minsize")) {
+            int val = std::stoi(req.get_param_value("minsize"));
+            if (val < 1) val = 1;
+            if (val > 100000) val = 100000;
+            minBlobPixels_.store(val);
+        }
         bool enabled = blobDetectEnabled_.load();
         int maxsz = maxBlobPixels_.load();
+        int minsz = minBlobPixels_.load();
         res.set_content("{\"enabled\":" + std::string(enabled ? "true" : "false") +
-                        ",\"maxsize\":" + std::to_string(maxsz) + "}",
+                        ",\"maxsize\":" + std::to_string(maxsz) +
+                        ",\"minsize\":" + std::to_string(minsz) + "}",
                         "application/json");
     });
 
@@ -292,6 +391,49 @@ void WebServer::run() {
         int tenths = fpsTenths_.load();
         std::string fpsStr = std::to_string(tenths / 10) + "." + std::to_string(tenths % 10);
         res.set_content("{\"fps\":" + fpsStr + "}", "application/json");
+    });
+
+    // GET /blobs — current blob positions as JSON
+    svr.Get("/blobs", [this](const httplib::Request&, httplib::Response& res) {
+        std::string json;
+        {
+            std::lock_guard<std::mutex> lock(frameMtx_);
+            json = blobsJson_;
+        }
+        if (json.empty()) json = "{\"w\":0,\"h\":0,\"blobs\":[]}";
+        res.set_content(json, "application/json");
+    });
+
+    // GET /events — SSE stream of blob/cursor updates
+    svr.Get("/events", [this](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_chunked_content_provider(
+            "text/event-stream",
+            [this](size_t /*offset*/, httplib::DataSink& sink) {
+                int lastSeq;
+                {
+                    std::lock_guard<std::mutex> lock(frameMtx_);
+                    lastSeq = blobsSeq_;
+                }
+                // Wait for new data or timeout (5s for keepalive)
+                {
+                    std::unique_lock<std::mutex> lock(frameMtx_);
+                    blobsCv_.wait_for(lock, std::chrono::seconds(5),
+                                      [&] { return blobsSeq_ != lastSeq || !running_; });
+                }
+                if (!running_) return false;
+                // Send current blob data as SSE event
+                std::string json;
+                {
+                    std::lock_guard<std::mutex> lock(frameMtx_);
+                    json = blobsJson_;
+                }
+                if (json.empty()) json = "{\"w\":0,\"h\":0,\"blobs\":[]}";
+                std::string event = "data: " + json + "\n\n";
+                sink.write(event.data(), event.size());
+                return true;
+            });
     });
 
     std::cout << "Web server listening on http://127.0.0.1:8080" << std::endl;

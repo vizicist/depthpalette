@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <vector>
 
 // Turbo colormap LUT (256 entries, RGB)
 // Approximation of the Turbo colormap: blue → cyan → green → yellow → red
@@ -71,6 +72,43 @@ inline void depthToThresholdBgr(const uint16_t* depthMm, int width, int height,
         outBgr[outIdx + 0] = val;
         outBgr[outIdx + 1] = val;
         outBgr[outIdx + 2] = val;
+    }
+}
+
+// Dilate the binary (black=foreground, white=background) BGR image in-place.
+// Uses a 3x3 square structuring element. Each iteration expands black regions
+// by one pixel in all 8 directions. Useful for connecting nearby blobs.
+inline void dilateBinaryBgr(uint8_t* bgr, int width, int height, int iterations) {
+    if (iterations <= 0) return;
+    int total = width * height;
+    std::vector<uint8_t> temp(total);
+
+    for (int iter = 0; iter < iterations; iter++) {
+        // Extract single channel (all channels identical for binary image)
+        for (int i = 0; i < total; i++) temp[i] = bgr[i * 3];
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int idx = y * width + x;
+                if (temp[idx] == 0) continue;  // already foreground, skip
+
+                // Check 3x3 neighborhood for any black (foreground) pixel
+                bool hasBlack = false;
+                for (int dy = -1; dy <= 1 && !hasBlack; dy++) {
+                    int ny = y + dy;
+                    if (ny < 0 || ny >= height) continue;
+                    for (int dx = -1; dx <= 1 && !hasBlack; dx++) {
+                        int nx = x + dx;
+                        if (nx < 0 || nx >= width) continue;
+                        if (temp[ny * width + nx] == 0) hasBlack = true;
+                    }
+                }
+                if (hasBlack) {
+                    int bi = idx * 3;
+                    bgr[bi] = bgr[bi + 1] = bgr[bi + 2] = 0;
+                }
+            }
+        }
     }
 }
 

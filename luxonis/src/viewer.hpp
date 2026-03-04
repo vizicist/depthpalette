@@ -30,6 +30,9 @@ public:
     void updateSideBySide(const uint8_t* leftBgr, int leftW, int leftH,
                           const uint8_t* rightBgr, int rightW, int rightH);
 
+    // Returns true if the window has been created.
+    bool isInitialized() const { return hwnd_ != nullptr; }
+
     // Pump window messages. Returns false when the window is closed.
     bool isRunning();
 

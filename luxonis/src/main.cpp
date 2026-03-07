@@ -12,7 +12,11 @@
 #include "blobdetect.hpp"
 #include "blobtracker.hpp"
 #include "depthcolor.hpp"
+#ifdef VIEWER_LINUX
+#include "viewer_linux.hpp"
+#else
 #include "viewer.hpp"
+#endif
 #include "webserver.hpp"
 
 // Shared settings — adjustable from the web UI

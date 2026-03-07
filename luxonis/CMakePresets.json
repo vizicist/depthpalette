@@ -28,6 +28,18 @@
             "environment": {
                 "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
             }
+        },
+        {
+            "name": "linux-release",
+            "displayName": "Linux Release",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            },
+            "environment": {
+                "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+            }
         }
     ],
     "buildPresets": [
@@ -38,6 +50,10 @@
         {
             "name": "msvc-debug",
             "configurePreset": "msvc-debug"
+        },
+        {
+            "name": "linux-release",
+            "configurePreset": "linux-release"
         }
     ]
 }

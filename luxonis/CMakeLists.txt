@@ -35,14 +35,27 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(httplib)
 
 # ---- Application ----
+if(WIN32)
+    set(VIEWER_SRC src/viewer.cpp)
+else()
+    set(VIEWER_SRC src/viewer_linux.cpp)
+endif()
+
 add_executable(depthpalette
     src/main.cpp
-    src/viewer.cpp
+    ${VIEWER_SRC}
     src/webserver.cpp
 )
 
-# Prevent windows.h min/max macros from conflicting
-target_compile_definitions(depthpalette PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+if(WIN32)
+    # Prevent windows.h min/max macros from conflicting
+    target_compile_definitions(depthpalette PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
+if(NOT WIN32)
+    # Use Linux viewer header instead of Windows one
+    target_compile_definitions(depthpalette PRIVATE VIEWER_LINUX)
+endif()
 
 target_include_directories(depthpalette PRIVATE src)
 target_link_libraries(depthpalette

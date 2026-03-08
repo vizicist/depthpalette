@@ -209,6 +209,17 @@ private:
     DeviceSettings devSettings_;
     DeviceCaps devCaps_;
 
+    // Sound / UI settings (persisted to settings.json)
+    std::atomic<int> soundMode_{0};
+    std::atomic<int> soundKey_{0};
+    std::atomic<int> soundDecay_{20};
+    std::atomic<int> soundRelease_{5};
+    std::atomic<int> soundMoveThresh_{0};
+    std::atomic<int> soundTempo_{120};
+    std::atomic<bool> showDepth_{false};
+    std::string soundScale_{"chromatic"};   // guarded by devSettingsMtx_
+    std::string soundQuantize_{"0"};        // guarded by devSettingsMtx_
+
     bool colorEnabled_;
     std::thread thread_;
     std::atomic<bool> running_{false};

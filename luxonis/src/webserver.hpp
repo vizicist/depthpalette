@@ -84,9 +84,6 @@ public:
 private:
     void run();
 
-    // Build a 24-bit BMP from a top-down packed BGR buffer.
-    static std::vector<uint8_t> makeBmp(const uint8_t* bgr, int width, int height);
-
     std::atomic<int>& thresholdMm_;
     std::atomic<bool>& thresholdEnabled_;
     std::atomic<int>& dilateIterations_;
@@ -121,6 +118,18 @@ private:
 
     std::mutex postProcMtx_;
     PostProcSettings postProc_;
+
+    // Sound / UI settings (persisted to settings.json)
+    std::atomic<int> soundMode_{0};
+    std::atomic<int> soundKey_{0};
+    std::atomic<int> soundDecay_{20};
+    std::atomic<int> soundRelease_{5};
+    std::atomic<int> soundMoveThresh_{0};
+    std::atomic<int> soundVolume_{50};
+    std::atomic<int> soundTempo_{120};
+    std::atomic<bool> showDepth_{false};
+    std::string soundScale_{"chromatic"};   // guarded by postProcMtx_
+    std::string soundQuantize_{"0"};        // guarded by postProcMtx_
 
     bool colorEnabled_;
     std::thread thread_;

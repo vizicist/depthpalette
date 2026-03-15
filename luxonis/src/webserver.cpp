@@ -11,128 +11,12 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-// ---- JPEG encoding for MJPEG streaming ----
-static void jpegWriteFunc(void* context, void* data, int size) {
-    auto* buf = static_cast<std::vector<uint8_t>*>(context);
-    auto* bytes = static_cast<const uint8_t*>(data);
-    buf->insert(buf->end(), bytes, bytes + size);
-}
+#include "webserver_common.hpp"
+#include "web_ui_shared.hpp"
 
-static std::vector<uint8_t> encodeJpeg(const uint8_t* bgr, int width, int height, int quality = 80) {
-    std::vector<uint8_t> rgb(static_cast<size_t>(width) * height * 3);
-    for (int i = 0; i < width * height; i++) {
-        rgb[i * 3 + 0] = bgr[i * 3 + 2];  // R <- B
-        rgb[i * 3 + 1] = bgr[i * 3 + 1];  // G
-        rgb[i * 3 + 2] = bgr[i * 3 + 0];  // B <- R
-    }
-    std::vector<uint8_t> jpeg;
-    jpeg.reserve(static_cast<size_t>(width) * height / 4);
-    stbi_write_jpg_to_func(jpegWriteFunc, &jpeg, width, height, 3, rgb.data(), quality);
-    return jpeg;
-}
+// ---- HTML page (Luxonis-specific segments; shared parts come from web_ui_shared.hpp) ----
 
-// ---- HTML page served at / ----
-static const std::string kIndexHtml = std::string(R"HTML(<!DOCTYPE html>
-<html>)HTML") + R"HTML(
-<head>
-<meta charset="utf-8">
-<title>DepthPalette</title>
-<style>
-  body { background: #1a1a2e; color: #eee; font-family: Arial, sans-serif;
-         margin: 0; display: flex; flex-direction: column; align-items: center; }
-  h1 { margin: 16px 0 8px; }
-  .images { display: flex; gap: 8px; margin: 8px 0; }
-  .images img { border: 1px solid #444; max-width: 640px; height: auto; transform: scaleX(-1); }
-  .images canvas { border: 1px solid #444; max-width: 640px; height: auto; transform: scaleX(-1); }
-  .controls { background: #16213e; padding: 16px 24px; border-radius: 8px;
-              display: flex; align-items: center; gap: 16px; margin: 8px 0;
-              flex-wrap: wrap; }
-  .controls label { font-size: 14px; }
-  .slider { width: 200px; }
-  .val { font-weight: bold; min-width: 70px; display: inline-block; }
-  .toggle { display: flex; align-items: center; gap: 8px; }
-  .switch { position: relative; width: 44px; height: 24px; }
-  .switch input { opacity: 0; width: 0; height: 0; }
-  .slider-track { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-                  background: #555; border-radius: 24px; transition: 0.3s; }
-  .slider-track:before { position: absolute; content: ""; height: 18px; width: 18px;
-                          left: 3px; bottom: 3px; background: white; border-radius: 50%;
-                          transition: 0.3s; }
-  .switch input:checked + .slider-track { background: #4caf50; }
-  .switch input:checked + .slider-track:before { transform: translateX(20px); }
-  .sep { width: 1px; height: 32px; background: #444; }
-  .fps { font-size: 13px; color: #8f8; font-family: monospace; }
-  select { background: #1a1a2e; color: #eee; border: 1px solid #444; border-radius: 4px;
-           padding: 4px 8px; font-size: 14px; }
-  .restart-note { font-size: 11px; color: #f80; }
-  .help-btn { display: inline-block; width: 16px; height: 16px; border-radius: 50%;
-              background: #555; color: #fff; font-size: 11px; text-align: center;
-              line-height: 16px; cursor: pointer; margin-left: 4px; font-weight: bold;
-              vertical-align: middle; user-select: none; flex-shrink: 0; }
-  .help-btn:hover { background: #888; }
-  .help-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-                  background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center;
-                  align-items: center; }
-  .help-overlay.active { display: flex; }
-  .help-box { background: #16213e; border: 1px solid #444; border-radius: 8px;
-              padding: 16px 20px; max-width: 400px; font-size: 14px; line-height: 1.5; }
-  .help-box h3 { margin: 0 0 8px; color: #8cf; }
-  .help-box p { margin: 0 0 12px; }
-  .help-box button { background: #444; color: #eee; border: none; border-radius: 4px;
-                     padding: 6px 16px; cursor: pointer; font-size: 13px; }
-  .help-box button:hover { background: #666; }
-</style>
-</head>
-<body>
-<div id="helpOverlay" class="help-overlay" onclick="if(event.target===this)closeHelp()">
-  <div class="help-box">
-    <h3 id="helpTitle"></h3>
-    <p id="helpText"></p>
-    <button onclick="closeHelp()">Close</button>
-  </div>
-</div>
-<h1>DepthPalette</h1>
-<div class="controls">
-  <div class="toggle">
-    <label class="switch">
-      <input id="threshToggle" type="checkbox" checked>
-      <span class="slider-track"></span>
-    </label>
-    <span>Threshold<span class="help-btn" onclick="showHelp('Threshold','Software depth threshold. Pixels beyond this distance are shown as black. Useful for filtering out background objects. Applies per-frame without restart.')">?</span></span>
-  </div>
-  <label>
-    <input id="threshSlider" class="slider" type="range" min="200" max="1200" step="10" value="550">
-  </label>
-  <span id="threshVal" class="val">550 mm</span>
-  <label>Dilate<span class="help-btn" onclick="showHelp('Dilate','Expands black (foreground) regions by N pixels using a 3x3 kernel. Applied after thresholding and before blob detection. Helps connect nearby blobs and fill small gaps. 0 = off. Does not require restart.')">?</span>:
-    <input id="dilateSlider" class="slider" type="range" min="0" max="10" step="1" value="0" style="width:100px">
-  </label>
-  <span id="dilateVal" class="val">0</span>
-  <div class="sep"></div>
-  <div class="toggle">
-    <label class="switch">
-      <input id="blobToggle" type="checkbox">
-      <span class="slider-track"></span>
-    </label>
-    <span>Blob Detection<span class="help-btn" onclick="showHelp('Blob Detection','Enables connected-component blob detection on the depth image. Detected blobs are outlined and tracked across frames.')">?</span></span>
-  </div>
-  <label>Max blob size<span class="help-btn" onclick="showHelp('Max Blob Size','Maximum number of pixels a blob can contain. Blobs larger than this are ignored. Helps filter out large surfaces like walls.')">?</span>:
-    <input id="blobSlider" class="slider" type="range" min="100" max="50000" step="100" value="5000">
-  </label>
-  <span id="blobVal" class="val">5000 px</span>
-  <label>Min blob size<span class="help-btn" onclick="showHelp('Min Blob Size','Minimum number of pixels a blob must contain. Blobs smaller than this are ignored. Helps filter out noise.')">?</span>:
-    <input id="minBlobSlider" class="slider" type="range" min="1" max="1000" step="1" value="20">
-  </label>
-  <span id="minBlobVal" class="val">20 px</span>
-  <div class="sep"></div>
-  <div class="toggle">
-    <label class="switch">
-      <input id="dotsToggle" type="checkbox">
-      <span class="slider-track"></span>
-    </label>
-    <span>Dots View<span class="help-btn" onclick="showHelp('Dots View','Replaces the depth image with a simplified dot display showing only tracked blob center positions.')">?</span></span>
-  </div>
-  <div class="sep"></div>
+static const std::string kLuxonisControls = R"HTML(
   <label>Confidence<span class="help-btn" onclick="showHelp('Confidence Threshold','Stereo matching confidence threshold (0-255). Higher values reject more uncertain depth pixels, reducing noise but creating more holes. Default: 245. Requires restart.')">?</span>:
     <input id="confSlider" class="slider" type="range" min="0" max="255" step="1" value="245">
   </label>
@@ -146,8 +30,6 @@ static const std::string kIndexHtml = std::string(R"HTML(<!DOCTYPE html>
     <span>Extended Disparity<span class="help-btn" onclick="showHelp('Extended Disparity','Doubles the disparity range from 0-95 to 0-190, allowing closer objects to be detected. Cannot be used together with subpixel mode. Requires restart.')">?</span></span>
   </div>
   <span id="restartNote" class="restart-note"></span>
-  <div class="sep"></div>
-  <span id="fpsDisplay" class="fps">-- fps</span>
 </div>
 )HTML" R"HTML(<div class="controls">
   <label>Preset<span class="help-btn" onclick="showHelp('Stereo Preset','Preconfigured stereo matching profiles. DEFAULT is general-purpose. FACE optimizes for close-range face detection. HIGH_DETAIL preserves fine detail. ROBOTICS optimizes for obstacle avoidance. Requires restart.')">?</span>:
@@ -314,37 +196,10 @@ static const std::string kIndexHtml = std::string(R"HTML(<!DOCTYPE html>
   <span id="threshFilterMaxVal" class="val">1200</span>
   <span>mm</span>
 </div>
-)HTML" R"HTML(<div class="images">
-  <img id="colorImg" src="/color.mjpeg" alt="Color">
-  <img id="depthImg" src="/depth.mjpeg" alt="Depth (B/W)">
-  <canvas id="dotsCanvas" style="display:none"></canvas>
-</div>
-<script>
-  function showHelp(title, text) {
-    document.getElementById('helpTitle').textContent = title;
-    document.getElementById('helpText').textContent = text;
-    document.getElementById('helpOverlay').classList.add('active');
-  }
-  function closeHelp() {
-    document.getElementById('helpOverlay').classList.remove('active');
-  }
+)HTML";
 
-  const threshToggle = document.getElementById('threshToggle');
-  const threshSlider = document.getElementById('threshSlider');
-  const threshVal = document.getElementById('threshVal');
-  const dilateSlider = document.getElementById('dilateSlider');
-  const dilateVal = document.getElementById('dilateVal');
-  const depthRangeToggle = document.getElementById('depthRangeToggle');
-  const blobToggle = document.getElementById('blobToggle');
-  const blobSlider = document.getElementById('blobSlider');
-  const blobVal = document.getElementById('blobVal');
-  const minBlobSlider = document.getElementById('minBlobSlider');
-  const minBlobVal = document.getElementById('minBlobVal');
-  const colorImg = document.getElementById('colorImg');
-  const depthImg = document.getElementById('depthImg');
-  const dotsToggle = document.getElementById('dotsToggle');
-  const dotsCanvas = document.getElementById('dotsCanvas');
-  const dotsCtx = dotsCanvas.getContext('2d');
+// Luxonis-specific JS: element refs, ppSend, event handlers, page-load fetches
+static const std::string kLuxonisScript = std::string(R"HTML(
   const confSlider = document.getElementById('confSlider');
   const confVal = document.getElementById('confVal');
   const extDispToggle = document.getElementById('extDispToggle');
@@ -389,6 +244,7 @@ static const std::string kIndexHtml = std::string(R"HTML(<!DOCTYPE html>
   const threshFilterMinVal = document.getElementById('threshFilterMinVal');
   const threshFilterMaxSlider = document.getElementById('threshFilterMaxSlider');
   const threshFilterMaxVal = document.getElementById('threshFilterMaxVal');
+  const depthRangeToggle = document.getElementById('depthRangeToggle');
 
   let restartTimer = null;
   function showRestart() {
@@ -397,73 +253,6 @@ static const std::string kIndexHtml = std::string(R"HTML(<!DOCTYPE html>
     restartTimer = setTimeout(function() { restartNote.textContent = ''; }, 5000);
   }
   function ppSend(params) { showRestart(); fetch('/postproc?' + params); }
-
-  let dotsMode = false;
-  let evtSource = null;
-
-  function drawDots(j) {
-    if (j.w > 0 && j.h > 0) {
-      dotsCanvas.width = j.w;
-      dotsCanvas.height = j.h;
-    }
-    dotsCtx.fillStyle = '#000';
-    dotsCtx.fillRect(0, 0, dotsCanvas.width, dotsCanvas.height);
-    if (j.blobs) {
-      for (const b of j.blobs) {
-        const r = Math.max(4, Math.min(20, Math.sqrt(b.px) / 2));
-        dotsCtx.beginPath();
-        dotsCtx.arc(b.cx, b.cy, r, 0, 2 * Math.PI);
-        dotsCtx.fillStyle = '#0f0';
-        dotsCtx.fill();
-      }
-    }
-  }
-
-  dotsToggle.addEventListener('change', function() {
-    dotsMode = dotsToggle.checked;
-    if (dotsMode) {
-      depthImg.style.display = 'none';
-      dotsCanvas.style.display = '';
-      evtSource = new EventSource('/events');
-      evtSource.onmessage = function(e) {
-        drawDots(JSON.parse(e.data));
-      };
-    } else {
-      depthImg.style.display = '';
-      dotsCanvas.style.display = 'none';
-      if (evtSource) { evtSource.close(); evtSource = null; }
-    }
-  });
-
-  threshToggle.addEventListener('change', function() {
-    threshSlider.disabled = !threshToggle.checked;
-    fetch('/threshold?enabled=' + (threshToggle.checked ? '1' : '0'));
-  });
-  threshSlider.addEventListener('input', function() {
-    threshVal.textContent = threshSlider.value + ' mm';
-    fetch('/threshold?value=' + threshSlider.value);
-  });
-
-  dilateSlider.addEventListener('input', function() {
-    dilateVal.textContent = dilateSlider.value;
-    fetch('/threshold?dilate=' + dilateSlider.value);
-  });
-
-  blobToggle.addEventListener('change', function() {
-    fetch('/blobdetect?enabled=' + (blobToggle.checked ? '1' : '0'));
-  });
-
-  blobSlider.addEventListener('input', function() {
-    const v = blobSlider.value;
-    blobVal.textContent = v + ' px';
-    fetch('/blobdetect?maxsize=' + v);
-  });
-
-  minBlobSlider.addEventListener('input', function() {
-    const v = minBlobSlider.value;
-    minBlobVal.textContent = v + ' px';
-    fetch('/blobdetect?minsize=' + v);
-  });
 
   confSlider.addEventListener('input', function() {
     confVal.textContent = confSlider.value;
@@ -551,29 +340,8 @@ static const std::string kIndexHtml = std::string(R"HTML(<!DOCTYPE html>
   threshFilterMinSlider.addEventListener('change', function() { ppSend('thresholdFilterMin=' + threshFilterMinSlider.value); });
   threshFilterMaxSlider.addEventListener('input', function() { threshFilterMaxVal.textContent = threshFilterMaxSlider.value; });
   threshFilterMaxSlider.addEventListener('change', function() { ppSend('thresholdFilterMax=' + threshFilterMaxSlider.value); });
-
-  // Fetch current settings on load
-  fetch('/threshold')
-    .then(r => r.json())
-    .then(j => {
-      threshToggle.checked = j.enabled;
-      threshSlider.value = j.threshold;
-      threshSlider.disabled = !j.enabled;
-      threshVal.textContent = j.threshold + ' mm';
-      dilateSlider.value = j.dilate;
-      dilateVal.textContent = j.dilate;
-    });
-
-  fetch('/blobdetect')
-    .then(r => r.json())
-    .then(j => {
-      blobToggle.checked = j.enabled;
-      blobSlider.value = j.maxsize;
-      blobVal.textContent = j.maxsize + ' px';
-      minBlobSlider.value = j.minsize;
-      minBlobVal.textContent = j.minsize + ' px';
-    });
-
+)HTML") + R"HTML(
+  // Fetch stereo config on load
   fetch('/stereoconfig')
     .then(r => r.json())
     .then(j => {
@@ -586,6 +354,7 @@ static const std::string kIndexHtml = std::string(R"HTML(<!DOCTYPE html>
       camFpsVal.textContent = j.fps + ' fps';
     });
 
+  // Fetch post-processing settings on load
   fetch('/postproc')
     .then(r => r.json())
     .then(j => {
@@ -629,19 +398,6 @@ static const std::string kIndexHtml = std::string(R"HTML(<!DOCTYPE html>
       threshFilterMinSlider.disabled = !j.thresholdFilterEnable;
       threshFilterMaxSlider.disabled = !j.thresholdFilterEnable;
     });
-
-  const fpsDisplay = document.getElementById('fpsDisplay');
-  function refreshFps() {
-    fetch('/fps')
-      .then(r => r.json())
-      .then(j => { fpsDisplay.textContent = j.fps.toFixed(1) + ' fps'; });
-  }
-
-  setInterval(refreshFps, 1000);
-  refreshFps();
-</script>
-</body>
-</html>
 )HTML";
 
 // ---- WebServer implementation ----
@@ -737,21 +493,22 @@ PostProcSettings WebServer::getPostProcSettings() {
 
 void WebServer::saveSettings() {
     PostProcSettings pp;
-    { std::lock_guard<std::mutex> lock(postProcMtx_); pp = postProc_; }
+    std::string sScale, sQuantize;
+    { std::lock_guard<std::mutex> lock(postProcMtx_); pp = postProc_; sScale = soundScale_; sQuantize = soundQuantize_; }
 
-    std::string json =
-        std::string("{\n"
-        "  \"thresholdMm\": ") + std::to_string(thresholdMm_.load()) + ",\n"
-        "  \"thresholdEnabled\": " + (thresholdEnabled_.load() ? "true" : "false") + ",\n"
-        "  \"dilateIterations\": " + std::to_string(dilateIterations_.load()) + ",\n"
-        "  \"blobDetectEnabled\": " + (blobDetectEnabled_.load() ? "true" : "false") + ",\n"
-        "  \"maxBlobPixels\": " + std::to_string(maxBlobPixels_.load()) + ",\n"
-        "  \"minBlobPixels\": " + std::to_string(minBlobPixels_.load()) + ",\n"
+    std::string json = "{\n"
+        + saveSharedSettingsJson(thresholdMm_.load(), thresholdEnabled_.load(),
+            dilateIterations_.load(), blobDetectEnabled_.load(),
+            maxBlobPixels_.load(), minBlobPixels_.load(), cameraFps_.load(),
+            soundMode_.load(), soundKey_.load(), sScale,
+            soundDecay_.load(), soundRelease_.load(), soundMoveThresh_.load(),
+            sQuantize, soundVolume_.load(), soundTempo_.load(), showDepth_.load())
+        + ",\n"
+        // Luxonis-specific fields
         "  \"confidenceThreshold\": " + std::to_string(confidenceThreshold_.load()) + ",\n"
         "  \"extendedDisparity\": " + (extendedDisparity_.load() ? "true" : "false") + ",\n"
         "  \"stereoPreset\": " + std::to_string(stereoPreset_.load()) + ",\n"
         "  \"monoResolution\": " + std::to_string(monoResolution_.load()) + ",\n"
-        "  \"cameraFps\": " + std::to_string(cameraFps_.load()) + ",\n"
         "  \"medianKernel\": " + std::to_string(pp.medianKernel) + ",\n"
         "  \"spatialEnable\": " + (pp.spatialEnable ? "true" : "false") + ",\n"
         "  \"spatialAlpha\": " + std::to_string(pp.spatialAlpha) + ",\n"
@@ -781,46 +538,7 @@ void WebServer::saveSettings() {
         "  \"aeCompensation\": " + std::to_string(pp.aeCompensation) + "\n"
         "}\n";
 
-    // Write to temp file then rename for atomic update
-    std::ofstream tmp("settings.json.tmp");
-    if (!tmp) { std::cerr << "Failed to write settings.json.tmp" << std::endl; return; }
-    tmp << json;
-    tmp.close();
-    std::remove("settings.json");
-    std::rename("settings.json.tmp", "settings.json");
-}
-
-// Simple helper: find "key": in text and extract the value (int or bool)
-static bool jsonInt(const std::string& text, const std::string& key, int& out) {
-    std::string needle = "\"" + key + "\":";
-    auto pos = text.find(needle);
-    if (pos == std::string::npos) return false;
-    pos += needle.size();
-    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t')) pos++;
-    if (pos >= text.size()) return false;
-    // Check for negative sign
-    bool negative = false;
-    if (text[pos] == '-') { negative = true; pos++; }
-    if (pos >= text.size() || !std::isdigit(static_cast<unsigned char>(text[pos]))) return false;
-    int val = 0;
-    while (pos < text.size() && std::isdigit(static_cast<unsigned char>(text[pos]))) {
-        val = val * 10 + (text[pos] - '0');
-        pos++;
-    }
-    out = negative ? -val : val;
-    return true;
-}
-
-static bool jsonBool(const std::string& text, const std::string& key, bool& out) {
-    std::string needle = "\"" + key + "\":";
-    auto pos = text.find(needle);
-    if (pos == std::string::npos) return false;
-    pos += needle.size();
-    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t')) pos++;
-    if (pos >= text.size()) return false;
-    if (text.compare(pos, 4, "true") == 0) { out = true; return true; }
-    if (text.compare(pos, 5, "false") == 0) { out = false; return true; }
-    return false;
+    writeSettingsFile(json);
 }
 
 void WebServer::loadSettings() {
@@ -831,19 +549,21 @@ void WebServer::loadSettings() {
                       std::istreambuf_iterator<char>());
     file.close();
 
-    int iv; bool bv;
-    if (jsonInt(text, "thresholdMm", iv)) thresholdMm_.store(iv);
-    if (jsonBool(text, "thresholdEnabled", bv)) thresholdEnabled_.store(bv);
-    if (jsonInt(text, "dilateIterations", iv)) dilateIterations_.store(iv);
-    if (jsonBool(text, "blobDetectEnabled", bv)) blobDetectEnabled_.store(bv);
-    if (jsonInt(text, "maxBlobPixels", iv)) maxBlobPixels_.store(iv);
-    if (jsonInt(text, "minBlobPixels", iv)) minBlobPixels_.store(iv);
+    // Load shared settings
+    loadSharedSettings(text, thresholdMm_, thresholdEnabled_, dilateIterations_,
+        blobDetectEnabled_, maxBlobPixels_, minBlobPixels_, cameraFps_,
+        soundMode_, soundKey_, soundDecay_, soundRelease_, soundMoveThresh_,
+        soundVolume_, soundTempo_, showDepth_);
+
+    int iv; bool bv; std::string sv;
+
+    // Luxonis-specific atomics
     if (jsonInt(text, "confidenceThreshold", iv)) confidenceThreshold_.store(iv);
     if (jsonBool(text, "extendedDisparity", bv)) extendedDisparity_.store(bv);
     if (jsonInt(text, "stereoPreset", iv)) stereoPreset_.store(iv);
     if (jsonInt(text, "monoResolution", iv)) monoResolution_.store(iv);
-    if (jsonInt(text, "cameraFps", iv)) cameraFps_.store(iv);
 
+    // Post-processing settings + sound strings
     {
         std::lock_guard<std::mutex> lock(postProcMtx_);
         if (jsonInt(text, "medianKernel", iv)) postProc_.medianKernel = iv;
@@ -873,58 +593,37 @@ void WebServer::loadSettings() {
         if (jsonInt(text, "lumaDenoise", iv)) postProc_.lumaDenoise = iv;
         if (jsonInt(text, "antiBanding", iv)) postProc_.antiBanding = iv;
         if (jsonInt(text, "aeCompensation", iv)) postProc_.aeCompensation = iv;
+        // Sound / UI settings (strings guarded by this mutex)
+        if (jsonString(text, "soundScale", sv)) soundScale_ = sv;
+        if (jsonString(text, "soundQuantize", sv)) soundQuantize_ = sv;
     }
 
     std::cout << "Loaded settings from settings.json" << std::endl;
 }
 
-std::vector<uint8_t> WebServer::makeBmp(const uint8_t* bgr, int width, int height) {
-    // BMP row stride must be a multiple of 4 bytes
-    int rowBytes = width * 3;
-    int rowPadding = (4 - (rowBytes % 4)) % 4;
-    int paddedRow = rowBytes + rowPadding;
-    int imageSize = paddedRow * height;
-    int fileSize = 54 + imageSize;
-
-    std::vector<uint8_t> bmp(fileSize, 0);
-
-    // -- File header (14 bytes) --
-    bmp[0] = 'B'; bmp[1] = 'M';
-    std::memcpy(&bmp[2], &fileSize, 4);
-    int dataOffset = 54;
-    std::memcpy(&bmp[10], &dataOffset, 4);
-
-    // -- Info header (40 bytes) --
-    int infoSize = 40;
-    std::memcpy(&bmp[14], &infoSize, 4);
-    std::memcpy(&bmp[18], &width, 4);
-    std::memcpy(&bmp[22], &height, 4);  // positive = bottom-up
-    uint16_t planes = 1;
-    std::memcpy(&bmp[26], &planes, 2);
-    uint16_t bpp = 24;
-    std::memcpy(&bmp[28], &bpp, 2);
-    // compression = 0 (BI_RGB), already zeroed
-    std::memcpy(&bmp[34], &imageSize, 4);
-
-    // -- Pixel data (bottom-up) --
-    uint8_t* dst = bmp.data() + 54;
-    for (int y = height - 1; y >= 0; y--) {
-        const uint8_t* srcRow = bgr + y * rowBytes;
-        std::memcpy(dst, srcRow, rowBytes);
-        dst += rowBytes;
-        // Pad row to 4-byte boundary
-        for (int p = 0; p < rowPadding; p++) *dst++ = 0;
-    }
-
-    return bmp;
-}
-
 void WebServer::run() {
     httplib::Server svr;
 
+    // Compose full HTML page from shared + Luxonis-specific parts
+    std::string fullHtml = "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+        "<title>DepthPalette</title>\n<style>"
+        + kSharedCss +
+        "</style>\n</head>\n<body>"
+        + kSharedHelpOverlay
+        + "\n<h1>DepthPalette</h1>\n"
+        + kSharedControls
+        + kLuxonisControls
+        + kSharedImages
+        + "\n<script>\n"
+        + kSharedSoundJs
+        + kSharedHandlersJs
+        + kLuxonisScript
+        + kSharedInitJs
+        + "\n</script>\n</body>\n</html>";
+
     // GET / — HTML page (hide color image if color stream is disabled)
-    svr.Get("/", [this](const httplib::Request&, httplib::Response& res) {
-        std::string html = kIndexHtml;
+    svr.Get("/", [this, &fullHtml](const httplib::Request&, httplib::Response& res) {
+        std::string html = fullHtml;
         if (!colorEnabled_) {
             std::string target = "<img id=\"colorImg\" src=\"/color.mjpeg\" alt=\"Color\">";
             auto pos = html.find(target);
@@ -1350,6 +1049,76 @@ void WebServer::run() {
             "application/json");
     });
 
+    // GET /soundsettings — get or set sound / UI parameters
+    svr.Get("/soundsettings", [this](const httplib::Request& req, httplib::Response& res) {
+        bool changed = false;
+        if (req.has_param("soundMode")) {
+            int v = std::stoi(req.get_param_value("soundMode"));
+            if (v < 0) v = 0; if (v > 3) v = 3;
+            soundMode_.store(v); changed = true;
+        }
+        if (req.has_param("soundKey")) {
+            int v = std::stoi(req.get_param_value("soundKey"));
+            if (v < 0) v = 0; if (v > 11) v = 11;
+            soundKey_.store(v); changed = true;
+        }
+        if (req.has_param("soundScale")) {
+            std::lock_guard<std::mutex> lock(postProcMtx_);
+            soundScale_ = req.get_param_value("soundScale");
+            changed = true;
+        }
+        if (req.has_param("soundDecay")) {
+            int v = std::stoi(req.get_param_value("soundDecay"));
+            if (v < 1) v = 1; if (v > 50) v = 50;
+            soundDecay_.store(v); changed = true;
+        }
+        if (req.has_param("soundRelease")) {
+            int v = std::stoi(req.get_param_value("soundRelease"));
+            if (v < 0) v = 0; if (v > 50) v = 50;
+            soundRelease_.store(v); changed = true;
+        }
+        if (req.has_param("soundMoveThresh")) {
+            int v = std::stoi(req.get_param_value("soundMoveThresh"));
+            if (v < 0) v = 0; if (v > 100) v = 100;
+            soundMoveThresh_.store(v); changed = true;
+        }
+        if (req.has_param("soundQuantize")) {
+            std::lock_guard<std::mutex> lock(postProcMtx_);
+            soundQuantize_ = req.get_param_value("soundQuantize");
+            changed = true;
+        }
+        if (req.has_param("soundVolume")) {
+            int v = std::stoi(req.get_param_value("soundVolume"));
+            if (v < 0) v = 0; if (v > 100) v = 100;
+            soundVolume_.store(v); changed = true;
+        }
+        if (req.has_param("soundTempo")) {
+            int v = std::stoi(req.get_param_value("soundTempo"));
+            if (v < 60) v = 60; if (v > 240) v = 240;
+            soundTempo_.store(v); changed = true;
+        }
+        if (req.has_param("showDepth")) {
+            showDepth_.store(req.get_param_value("showDepth") == "1");
+            changed = true;
+        }
+        if (changed) saveSettings();
+
+        std::string sScale, sQuantize;
+        { std::lock_guard<std::mutex> lock(postProcMtx_); sScale = soundScale_; sQuantize = soundQuantize_; }
+        std::string json = "{\"soundMode\":" + std::to_string(soundMode_.load())
+            + ",\"soundKey\":" + std::to_string(soundKey_.load())
+            + ",\"soundScale\":\"" + sScale + "\""
+            + ",\"soundDecay\":" + std::to_string(soundDecay_.load())
+            + ",\"soundRelease\":" + std::to_string(soundRelease_.load())
+            + ",\"soundMoveThresh\":" + std::to_string(soundMoveThresh_.load())
+            + ",\"soundQuantize\":\"" + sQuantize + "\""
+            + ",\"soundVolume\":" + std::to_string(soundVolume_.load())
+            + ",\"soundTempo\":" + std::to_string(soundTempo_.load())
+            + ",\"showDepth\":" + (showDepth_.load() ? "true" : "false")
+            + "}";
+        res.set_content(json, "application/json");
+    });
+
     // GET /fps — current processing FPS
     svr.Get("/fps", [this](const httplib::Request&, httplib::Response& res) {
         int tenths = fpsTenths_.load();
@@ -1400,7 +1169,7 @@ void WebServer::run() {
             });
     });
 
-    std::cout << "Web server listening on http://127.0.0.1:8080" << std::endl;
+    std::cout << "Web server listening on http://0.0.0.0:8080" << std::endl;
 
     // svr.listen blocks — we stop it by calling svr.stop() from the destructor thread.
     // But httplib doesn't have a thread-safe stop easily, so we use listen_after_bind
@@ -1415,7 +1184,7 @@ void WebServer::run() {
         svr.stop();
     });
 
-    svr.listen("127.0.0.1", 8080);
+    svr.listen("0.0.0.0", 8080);
 
     stopper.join();
     std::cout << "Web server stopped." << std::endl;

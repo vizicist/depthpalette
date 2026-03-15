@@ -5,7 +5,7 @@
 #include <vector>
 
 // Turbo colormap LUT (256 entries, RGB)
-// Approximation of the Turbo colormap: blue → cyan → green → yellow → red
+// Approximation of the Turbo colormap: blue -> cyan -> green -> yellow -> red
 inline void turboRgb(uint8_t idx, uint8_t& r, uint8_t& g, uint8_t& b) {
     // Piecewise linear approximation of the turbo colormap
     float t = idx / 255.0f;
@@ -37,7 +37,7 @@ inline void turboRgb(uint8_t idx, uint8_t& r, uint8_t& g, uint8_t& b) {
 
 // Convert a raw uint16 depth image (millimeters) to packed BGR for display.
 // outBgr must be pre-allocated to width * height * 3 bytes.
-// Depth 0 (invalid) → black. Values are clamped to [0, maxDepthMm].
+// Depth 0 (invalid) -> black. Values are clamped to [0, maxDepthMm].
 inline void depthToColorBgr(const uint16_t* depthMm, int width, int height,
                              uint8_t* outBgr, uint16_t maxDepthMm = 10000) {
     float scale = 255.0f / maxDepthMm;
@@ -61,8 +61,8 @@ inline void depthToColorBgr(const uint16_t* depthMm, int width, int height,
     }
 }
 
-// Threshold depth to black/white. Closer than thresholdMm → black, farther → white.
-// Depth 0 (invalid/no data) → white.
+// Threshold depth to black/white. Closer than thresholdMm -> black, farther -> white.
+// Depth 0 (invalid/no data) -> white.
 inline void depthToThresholdBgr(const uint16_t* depthMm, int width, int height,
                                  uint8_t* outBgr, uint16_t thresholdMm) {
     for (int i = 0; i < width * height; i++) {
@@ -112,7 +112,22 @@ inline void dilateBinaryBgr(uint8_t* bgr, int width, int height, int iterations)
     }
 }
 
+// Convert packed RGB to packed BGR (swap R and B channels).
+// Used by Orbbec cameras which output packed RGB frames.
+// outBgr must be pre-allocated to width * height * 3 bytes.
+inline void packedRgbToPackedBgr(const uint8_t* rgb, int width, int height,
+                                  uint8_t* outBgr) {
+    int total = width * height;
+    for (int i = 0; i < total; i++) {
+        int idx = i * 3;
+        outBgr[idx + 0] = rgb[idx + 2];  // B <- R
+        outBgr[idx + 1] = rgb[idx + 1];  // G
+        outBgr[idx + 2] = rgb[idx + 0];  // R <- B
+    }
+}
+
 // Convert planar RGB (depthai format) to packed BGR (Windows format).
+// Used by Luxonis cameras which output planar RGB frames.
 // outBgr must be pre-allocated to width * height * 3 bytes.
 inline void planarRgbToPackedBgr(const uint8_t* planarRgb, int width, int height,
                                   uint8_t* outBgr) {

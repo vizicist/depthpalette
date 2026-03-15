@@ -36,7 +36,7 @@ FetchContent_MakeAvailable(httplib)
 
 # ---- Application ----
 if(WIN32)
-    set(VIEWER_SRC src/viewer.cpp)
+    set(VIEWER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../common/src/viewer.cpp)
 else()
     set(VIEWER_SRC src/viewer_linux.cpp)
 endif()
@@ -57,7 +57,10 @@ if(NOT WIN32)
     target_compile_definitions(depthpalette PRIVATE VIEWER_LINUX)
 endif()
 
-target_include_directories(depthpalette PRIVATE src)
+target_include_directories(depthpalette PRIVATE
+    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/src
+)
 target_link_libraries(depthpalette
     PRIVATE
         depthai::core

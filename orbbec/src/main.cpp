@@ -15,8 +15,8 @@
 #include "viewer.hpp"
 #include "webserver.hpp"
 
-// Shared settings — adjustable from the web UI
-static std::atomic<int> g_thresholdMm{550};
+// Shared settings — adjustable from the web UI  
+static std::atomic<int> g_thresholdMm{500};
 static std::atomic<bool> g_thresholdEnabled{true};
 static std::atomic<int> g_dilateIterations{0};
 static std::atomic<bool> g_blobDetectEnabled{true};

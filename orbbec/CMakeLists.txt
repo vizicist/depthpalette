@@ -27,14 +27,17 @@ FetchContent_MakeAvailable(httplib)
 # ---- Application ----
 add_executable(depthpalette
     src/main.cpp
-    src/viewer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/src/viewer.cpp
     src/webserver.cpp
 )
 
 # Prevent windows.h min/max macros from conflicting
 target_compile_definitions(depthpalette PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 
-target_include_directories(depthpalette PRIVATE src)
+target_include_directories(depthpalette PRIVATE
+    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/src
+)
 target_link_libraries(depthpalette
     PRIVATE
         ob::OrbbecSDK

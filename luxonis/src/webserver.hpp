@@ -75,6 +75,10 @@ public:
     // Read current post-processing settings (thread-safe copy).
     PostProcSettings getPostProcSettings();
 
+    // Set device info (call after device creation).
+    void setDeviceInfo(const std::string& connectionType, const std::string& deviceName,
+                       const std::string& mxId);
+
     // Load settings from settings.json (call before start()).
     void loadSettings();
 
@@ -130,6 +134,11 @@ private:
     std::atomic<bool> showDepth_{false};
     std::string soundScale_{"chromatic"};   // guarded by postProcMtx_
     std::string soundQuantize_{"0"};        // guarded by postProcMtx_
+
+    // Device info (guarded by postProcMtx_)
+    std::string connectionType_;
+    std::string deviceName_;
+    std::string mxId_;
 
     bool colorEnabled_;
     std::thread thread_;

@@ -15,8 +15,8 @@
 #include "viewer.hpp"
 #include "webserver.hpp"
 
-// Shared settings — adjustable from the web UI  
-static std::atomic<int> g_thresholdMm{500};
+// Shared settings — adjustable from the web UI
+static std::atomic<int> g_thresholdMm{550};
 static std::atomic<bool> g_thresholdEnabled{true};
 static std::atomic<int> g_dilateIterations{0};
 static std::atomic<bool> g_blobDetectEnabled{true};
@@ -122,6 +122,15 @@ static DeviceCaps queryCapabilities(std::shared_ptr<ob::Device> device) {
             auto mode = modeList->getOBDepthWorkMode(i);
             caps.workModes.push_back(mode.name);
         }
+    } catch (...) {}
+
+    // Device info
+    try {
+        auto info = device->getDeviceInfo();
+        caps.connectionType = info->getConnectionType();
+        caps.deviceName = info->getName();
+        caps.firmwareVersion = info->getFirmwareVersion();
+        caps.serialNumber = info->getSerialNumber();
     } catch (...) {}
 
     return caps;
@@ -330,6 +339,8 @@ int main(int argc, char* argv[]) {
                   << " res=" << reqW << "x" << reqH
                   << " fps=" << camFps << std::endl;
 
+        try {
+
         ob::Pipeline pipe;
 
         // Switch depth work mode before configuring streams (if requested)
@@ -349,14 +360,99 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // Query available depth profiles and find the best match
+        std::shared_ptr<const ob::StreamProfile> depthProfile;
+        {
+        auto devTmp = pipe.getDevice();
+        auto sensorList = devTmp->getSensorList();
+        for (uint32_t si = 0; si < sensorList->getCount(); si++) {
+            if (sensorList->getSensorType(si) != OB_SENSOR_DEPTH) continue;
+            auto sensor = sensorList->getSensor(si);
+            auto profiles = sensor->getStreamProfileList();
+
+            // First pass: try exact match (resolution + fps + Y16)
+            for (uint32_t pi = 0; pi < profiles->getCount(); pi++) {
+                auto p = profiles->getProfile(pi)->as<ob::VideoStreamProfile>();
+                if (p->getFormat() == OB_FORMAT_Y16 &&
+                    static_cast<int>(p->getWidth()) == reqW &&
+                    static_cast<int>(p->getHeight()) == reqH &&
+                    static_cast<int>(p->fps()) == camFps) {
+                    depthProfile = profiles->getProfile(pi);
+                    break;
+                }
+            }
+
+            // Second pass: match resolution, pick highest fps for Y16
+            if (!depthProfile) {
+                int bestFps = 0;
+                for (uint32_t pi = 0; pi < profiles->getCount(); pi++) {
+                    auto p = profiles->getProfile(pi)->as<ob::VideoStreamProfile>();
+                    if (p->getFormat() == OB_FORMAT_Y16 &&
+                        static_cast<int>(p->getWidth()) == reqW &&
+                        static_cast<int>(p->getHeight()) == reqH &&
+                        static_cast<int>(p->fps()) > bestFps) {
+                        bestFps = p->fps();
+                        depthProfile = profiles->getProfile(pi);
+                    }
+                }
+            }
+
+            // Third pass: pick largest Y16 profile at highest fps
+            if (!depthProfile) {
+                std::cout << "Available depth profiles:" << std::endl;
+                int bestScore = 0;
+                for (uint32_t pi = 0; pi < profiles->getCount(); pi++) {
+                    auto p = profiles->getProfile(pi)->as<ob::VideoStreamProfile>();
+                    std::cout << "  " << p->getWidth() << "x" << p->getHeight()
+                              << " @ " << p->fps() << "fps fmt=" << p->getFormat() << std::endl;
+                    if (p->getFormat() == OB_FORMAT_Y16) {
+                        // Score: prefer more pixels, then higher fps
+                        int score = p->getWidth() * p->getHeight() * 100 + p->fps();
+                        if (score > bestScore) {
+                            bestScore = score;
+                            depthProfile = profiles->getProfile(pi);
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        } // end profile query scope
+
         auto config = std::make_shared<ob::Config>();
-        config->enableVideoStream(OB_STREAM_DEPTH, reqW, reqH, camFps, OB_FORMAT_Y16);
-        if (showColor) {
-            config->enableVideoStream(OB_STREAM_COLOR, OB_WIDTH_ANY, OB_HEIGHT_ANY,
-                                      camFps, OB_FORMAT_RGB);
+        if (depthProfile) {
+            auto vp = depthProfile->as<ob::VideoStreamProfile>();
+            if (static_cast<int>(vp->getWidth()) != reqW ||
+                static_cast<int>(vp->getHeight()) != reqH ||
+                static_cast<int>(vp->fps()) != camFps) {
+                std::cout << "Requested " << reqW << "x" << reqH << " @ " << camFps
+                          << "fps not available, using " << vp->getWidth() << "x"
+                          << vp->getHeight() << " @ " << vp->fps() << "fps" << std::endl;
+            }
+            reqW = vp->getWidth();
+            reqH = vp->getHeight();
+            camFps = vp->fps();
+            config->enableStream(depthProfile);
+        } else {
+            std::cerr << "No Y16 depth profile found, trying default..." << std::endl;
+            config->enableStream(OB_STREAM_DEPTH);
         }
 
-        std::cout << "Starting pipeline..." << std::endl;
+        if (showColor) {
+            try {
+                config->enableVideoStream(OB_STREAM_COLOR, OB_WIDTH_ANY, OB_HEIGHT_ANY,
+                                          camFps, OB_FORMAT_RGB);
+            } catch (...) {
+                std::cerr << "Warning: could not enable color stream at requested fps, trying any" << std::endl;
+                try {
+                    config->enableStream(OB_STREAM_COLOR);
+                } catch (...) {
+                    std::cerr << "Warning: could not enable color stream" << std::endl;
+                }
+            }
+        }
+
+        std::cout << "Starting pipeline..." << std::flush << std::endl;
         pipe.start(config);
 
         // Get device handle and query capabilities
@@ -599,6 +695,13 @@ int main(int argc, char* argv[]) {
         std::cout << "Done (" << frameCount << " frames)." << std::endl;
 
         pipe.stop();
+
+        } catch (const std::exception& e) {
+            std::cerr << "Pipeline error: " << e.what() << std::endl;
+            std::cerr << "Retrying in 3 seconds..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            continue;
+        }
 
         // If restart was requested, loop back; otherwise exit
         if (!g_restartRequested.load() && !g_configDirty.load()) break;

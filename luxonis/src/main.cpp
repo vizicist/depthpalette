@@ -208,10 +208,28 @@ int main(int argc, char* argv[]) {
                   << " preset=" << g_stereoPreset.load()
                   << " res=" << g_monoResolution.load()
                   << " fps=" << camFps << std::endl;
+
+        try {
+
         auto pipeline = createPipeline(showColor, preset, confThreshold, extDisp, pp, monoRes, camFps);
 
         std::cout << "Connecting to OAK-D..." << std::endl;
         dai::Device device(pipeline);
+
+        // Query and display device info
+        {
+            std::string usbStr;
+            switch (device.getUsbSpeed()) {
+                case dai::UsbSpeed::HIGH:       usbStr = "USB2"; break;
+                case dai::UsbSpeed::SUPER:      usbStr = "USB3"; break;
+                case dai::UsbSpeed::SUPER_PLUS: usbStr = "USB3.1"; break;
+                default:                        usbStr = "USB"; break;
+            }
+            std::string devName = device.getDeviceName();
+            std::string mxId = device.getMxId();
+            std::cout << "Device: " << devName << " (" << usbStr << ") MxId: " << mxId << std::endl;
+            webServer.setDeviceInfo(usbStr, devName, mxId);
+        }
 
         auto depthQueue = device.getOutputQueue("depth", 4, false);
 
@@ -406,6 +424,13 @@ int main(int argc, char* argv[]) {
         }
 
         std::cout << "Done (" << frameCount << " frames)." << std::endl;
+
+        } catch (const std::exception& e) {
+            std::cerr << "Pipeline error: " << e.what() << std::endl;
+            std::cerr << "Retrying in 3 seconds..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            continue;
+        }
 
         // If restart was requested (preset change), loop back; otherwise exit
         if (!g_restartRequested.load() && !g_configDirty.load()) break;

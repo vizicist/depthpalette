@@ -11,12 +11,208 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-#include "webserver_common.hpp"
-#include "web_ui_shared.hpp"
+// ---- JPEG encoding for MJPEG streaming ----
+static void jpegWriteFunc(void* context, void* data, int size) {
+    auto* buf = static_cast<std::vector<uint8_t>*>(context);
+    auto* bytes = static_cast<const uint8_t*>(data);
+    buf->insert(buf->end(), bytes, bytes + size);
+}
 
-// ---- HTML page (Orbbec-specific segments; shared parts come from web_ui_shared.hpp) ----
+static std::vector<uint8_t> encodeJpeg(const uint8_t* bgr, int width, int height, int quality = 80) {
+    std::vector<uint8_t> rgb(static_cast<size_t>(width) * height * 3);
+    for (int i = 0; i < width * height; i++) {
+        rgb[i * 3 + 0] = bgr[i * 3 + 2];  // R <- B
+        rgb[i * 3 + 1] = bgr[i * 3 + 1];  // G
+        rgb[i * 3 + 2] = bgr[i * 3 + 0];  // B <- R
+    }
+    std::vector<uint8_t> jpeg;
+    jpeg.reserve(static_cast<size_t>(width) * height / 4);
+    stbi_write_jpg_to_func(jpegWriteFunc, &jpeg, width, height, 3, rgb.data(), quality);
+    return jpeg;
+}
 
-static const std::string kOrbbecControls2 = R"HTML(
+// ---- HTML page (split into segments to stay under MSVC 16KB raw string limit) ----
+
+static const std::string kHtmlHead = R"HTML(<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DepthPalette (Orbbec)</title>
+<style>
+  body { background: #1a1a2e; color: #eee; font-family: Arial, sans-serif;
+         margin: 0; display: flex; flex-direction: column; align-items: center; }
+  h1 { margin: 16px 0 8px; }
+  .images { display: flex; gap: 8px; margin: 8px 0; }
+  .images img, .images > canvas, .images .depth-wrap > canvas:first-child {
+    border: 1px solid #444; max-width: 640px; height: auto; transform: scaleX(-1); }
+  .images .depth-wrap canvas { transform: scaleX(-1); }
+  .depth-wrap { position: relative; }
+  .depth-wrap canvas { position: absolute; top: 0; left: 0; }
+  .controls { background: #16213e; padding: 16px 24px; border-radius: 8px;
+              display: flex; align-items: center; gap: 16px; margin: 8px 0;
+              flex-wrap: wrap; }
+  .controls label { font-size: 14px; }
+  .slider { width: 200px; }
+  .val { font-weight: bold; min-width: 70px; display: inline-block; }
+  .toggle { display: flex; align-items: center; gap: 8px; }
+  .switch { position: relative; width: 44px; height: 24px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider-track { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+                  background: #555; border-radius: 24px; transition: 0.3s; }
+  .slider-track:before { position: absolute; content: ""; height: 18px; width: 18px;
+                          left: 3px; bottom: 3px; background: white; border-radius: 50%;
+                          transition: 0.3s; }
+  .switch input:checked + .slider-track { background: #4caf50; }
+  .switch input:checked + .slider-track:before { transform: translateX(20px); }
+  .sep { width: 1px; height: 32px; background: #444; }
+  .fps { font-size: 13px; color: #8f8; font-family: monospace; }
+  select { background: #1a1a2e; color: #eee; border: 1px solid #444; border-radius: 4px;
+           padding: 4px 8px; font-size: 14px; }
+  .restart-note { font-size: 11px; color: #f80; }
+  .help-btn { display: inline-block; width: 16px; height: 16px; border-radius: 50%;
+              background: #555; color: #fff; font-size: 11px; text-align: center;
+              line-height: 16px; cursor: pointer; margin-left: 4px; font-weight: bold;
+              vertical-align: middle; user-select: none; flex-shrink: 0; }
+  .help-btn:hover { background: #888; }
+  .help-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                  background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center;
+                  align-items: center; }
+  .help-overlay.active { display: flex; }
+  .help-box { background: #16213e; border: 1px solid #444; border-radius: 8px;
+              padding: 16px 20px; max-width: 400px; font-size: 14px; line-height: 1.5; }
+  .help-box h3 { margin: 0 0 8px; color: #8cf; }
+  .help-box p { margin: 0 0 12px; }
+  .help-box button { background: #444; color: #eee; border: none; border-radius: 4px;
+                     padding: 6px 16px; cursor: pointer; font-size: 13px; }
+  .help-box button:hover { background: #666; }
+  h2 { font-size: 15px; margin: 12px 0 4px; color: #8cf; width: 100%; }
+  .unsupported { display: none !important; }
+</style>
+</head>
+<body>
+<div id="helpOverlay" class="help-overlay" onclick="if(event.target===this)closeHelp()">
+  <div class="help-box">
+    <h3 id="helpTitle"></h3>
+    <p id="helpText"></p>
+    <button onclick="closeHelp()">Close</button>
+  </div>
+</div>
+<h1>DepthPalette (Orbbec)</h1>
+)HTML";
+
+static const std::string kHtmlControls1 = R"HTML(
+<div class="controls">
+  <div class="toggle">
+    <label class="switch">
+      <input id="threshToggle" type="checkbox" checked>
+      <span class="slider-track"></span>
+    </label>
+    <span>Threshold<span class="help-btn" onclick="showHelp('Threshold','Software depth threshold. Pixels closer than this distance are shown as black.')">?</span></span>
+  </div>
+  <label>
+    <input id="threshSlider" class="slider" type="range" min="200" max="1200" step="10" value="550">
+  </label>
+  <span id="threshVal" class="val">550 mm</span>
+  <label>Dilate<span class="help-btn" onclick="showHelp('Dilate','Expands black regions by N pixels. Helps connect nearby blobs.')">?</span>:
+    <input id="dilateSlider" class="slider" type="range" min="0" max="10" step="1" value="0" style="width:100px">
+  </label>
+  <span id="dilateVal" class="val">0</span>
+  <div class="sep"></div>
+  <div class="toggle">
+    <label class="switch">
+      <input id="blobToggle" type="checkbox">
+      <span class="slider-track"></span>
+    </label>
+    <span>Blob Detection<span class="help-btn" onclick="showHelp('Blob Detection','Connected-component blob detection on depth image.')">?</span></span>
+  </div>
+  <label>Max:
+    <input id="blobSlider" class="slider" type="range" min="100" max="50000" step="100" value="5000">
+  </label>
+  <span id="blobVal" class="val">5000 px</span>
+  <label>Min:
+    <input id="minBlobSlider" class="slider" type="range" min="1" max="4000" step="1" value="20">
+  </label>
+  <span id="minBlobVal" class="val">20 px</span>
+  <div class="sep"></div>
+  <label>Mode<span class="help-btn" onclick="showHelp('Mode','No Dots: depth image only. Dots Only: shows blob positions on black canvas. Dots+Pitches: plays a pitched tone when a new blob appears (pitch = horizontal position, 2 octaves C4-C6). Dots+Sound: placeholder for future audio mode.')">?</span>:
+    <select id="modeSelect">
+      <option value="0">No Dots</option>
+      <option value="1">Dots Only</option>
+      <option value="2">Dots + Pitches</option>
+      <option value="3">Dots + Sound</option>
+    </select>
+  </label>
+  <label>Key:
+    <select id="keySelect">
+      <option value="0">C</option>
+      <option value="1">C&#9839;</option>
+      <option value="2">D</option>
+      <option value="3">D&#9839;</option>
+      <option value="4">E</option>
+      <option value="5">F</option>
+      <option value="6">F&#9839;</option>
+      <option value="7">G</option>
+      <option value="8">G&#9839;</option>
+      <option value="9">A</option>
+      <option value="10">A&#9839;</option>
+      <option value="11">B</option>
+    </select>
+  </label>
+  <label>Scale:
+    <select id="scaleSelect">
+      <option value="chromatic">Chromatic</option>
+      <option value="major">Major</option>
+      <option value="minor">Minor</option>
+      <option value="pentatonic">Pentatonic</option>
+      <option value="blues">Blues</option>
+      <option value="lydian">Lydian</option>
+      <option value="dorian">Dorian</option>
+      <option value="mixolydian">Mixolydian</option>
+      <option value="fifths">Fifths</option>
+      <option value="wholetone">Whole Tone</option>
+    </select>
+  </label>
+  <label>Decay:
+    <input id="decaySlider" class="slider" type="range" min="1" max="50" step="1" value="20" style="width:100px">
+  </label>
+  <span id="decayVal" class="val">2.0 s</span>
+  <label>Release:
+    <input id="releaseSlider" class="slider" type="range" min="0" max="50" step="1" value="5" style="width:100px">
+  </label>
+  <span id="releaseVal" class="val">0.5 s</span>
+  <label>Move:
+    <input id="moveThreshSlider" class="slider" type="range" min="0" max="100" step="1" value="0" style="width:100px">
+  </label>
+  <span id="moveThreshVal" class="val">off</span>
+  <label>Quantize:
+    <select id="quantizeSelect">
+      <option value="0">none</option>
+      <option value="4">1</option>
+      <option value="2">1/2</option>
+      <option value="1">1/4</option>
+      <option value="0.5">1/8</option>
+      <option value="0.25">1/16</option>
+    </select>
+  </label>
+  <label>Tempo:
+    <input id="tempoSlider" class="slider" type="range" min="60" max="240" step="1" value="120" style="width:100px">
+  </label>
+  <span id="tempoVal" class="val">120 bpm</span>
+  <div class="sep"></div>
+  <div class="toggle">
+    <label class="switch">
+      <input id="showDepthToggle" type="checkbox">
+      <span class="slider-track"></span>
+    </label>
+    <span>Show Depth</span>
+  </div>
+  <div class="sep"></div>
+  <span id="fpsDisplay" class="fps">-- fps</span>
+  <span id="usbInfo" class="fps" style="margin-left:12px"></span>
+</div>
+)HTML";
+
+static const std::string kHtmlControls2 = R"HTML(
 <div class="controls">
   <label>Resolution<span class="help-btn" onclick="showHelp('Resolution','Depth stream resolution. Requires restart.')">?</span>:
     <select id="resolutionSelect">
@@ -48,7 +244,7 @@ static const std::string kOrbbecControls2 = R"HTML(
 </div>
 )HTML";
 
-static const std::string kOrbbecControls3 = R"HTML(
+static const std::string kHtmlControls3 = R"HTML(
 <div class="controls">
   <h2>Depth Filters</h2>
   <span id="speckleWrap">
@@ -106,7 +302,7 @@ static const std::string kOrbbecControls3 = R"HTML(
 </div>
 )HTML";
 
-static const std::string kOrbbecControls4 = R"HTML(
+static const std::string kHtmlControls4 = R"HTML(
 <div class="controls">
   <h2>Laser & Exposure</h2>
   <span id="laserWrap">
@@ -160,7 +356,7 @@ static const std::string kOrbbecControls4 = R"HTML(
 </div>
 )HTML";
 
-static const std::string kOrbbecControls5 = R"HTML(
+static const std::string kHtmlControls5 = R"HTML(
 <div class="controls">
   <h2>Mirror & Flip</h2>
   <span id="depthMirrorWrap">
@@ -202,7 +398,7 @@ static const std::string kOrbbecControls5 = R"HTML(
 </div>
 )HTML";
 
-static const std::string kOrbbecControls6 = R"HTML(
+static const std::string kHtmlControls6 = R"HTML(
 <div class="controls" id="colorControlsSection">
   <h2>Color Camera</h2>
   <span id="colorExpWrap">
@@ -260,8 +456,45 @@ static const std::string kOrbbecControls6 = R"HTML(
 </div>
 )HTML";
 
-// Orbbec-specific JS: resolution/fps element refs and handlers
-static const std::string kOrbbecScript1 = R"HTML(
+static const std::string kHtmlImages = R"HTML(
+<div class="images">
+  <canvas id="colorCanvas" width="640" height="480"></canvas>
+  <div class="depth-wrap">
+    <canvas id="depthCanvas" width="640" height="480"></canvas>
+    <canvas id="dotsCanvas" style="display:none"></canvas>
+  </div>
+</div>
+)HTML";
+
+static const std::string kHtmlScript1 = R"HTML(
+<script>
+  function showHelp(title, text) {
+    document.getElementById('helpTitle').textContent = title;
+    document.getElementById('helpText').textContent = text;
+    document.getElementById('helpOverlay').classList.add('active');
+  }
+  function closeHelp() {
+    document.getElementById('helpOverlay').classList.remove('active');
+  }
+
+  const threshToggle = document.getElementById('threshToggle');
+  const threshSlider = document.getElementById('threshSlider');
+  const threshVal = document.getElementById('threshVal');
+  const dilateSlider = document.getElementById('dilateSlider');
+  const dilateVal = document.getElementById('dilateVal');
+  const blobToggle = document.getElementById('blobToggle');
+  const blobSlider = document.getElementById('blobSlider');
+  const blobVal = document.getElementById('blobVal');
+  const minBlobSlider = document.getElementById('minBlobSlider');
+  const minBlobVal = document.getElementById('minBlobVal');
+  const colorCanvas = document.getElementById('colorCanvas');
+  const colorCtx = colorCanvas.getContext('2d');
+  const depthCanvas = document.getElementById('depthCanvas');
+  const depthCtx = depthCanvas.getContext('2d');
+  const modeSelect = document.getElementById('modeSelect');
+  const dotsCanvas = document.getElementById('dotsCanvas');
+  const dotsCtx = dotsCanvas.getContext('2d');
+  const showDepthToggle = document.getElementById('showDepthToggle');
   const resolutionSelect = document.getElementById('resolutionSelect');
   const camFpsSlider = document.getElementById('camFpsSlider');
   const camFpsVal = document.getElementById('camFpsVal');
@@ -273,6 +506,333 @@ static const std::string kOrbbecScript1 = R"HTML(
     if (restartTimer) clearTimeout(restartTimer);
     restartTimer = setTimeout(function() { restartNote.textContent = ''; }, 5000);
   }
+
+  // Raw frame streaming — fetch /depth.raw and /color.raw in a tight loop
+  function startRawStream(url, canvas, ctx) {
+    let seq = 0;
+    let running = true;
+    let imgData = null;
+    async function fetchLoop() {
+      while (running) {
+        try {
+          const resp = await fetch(url + '?seq=' + seq);
+          if (resp.status === 204) { await new Promise(r => setTimeout(r, 100)); continue; }
+          const buf = await resp.arrayBuffer();
+          if (buf.byteLength < 8) continue;
+          const hdr = new Uint8Array(buf, 0, 8);
+          const w = hdr[0] | (hdr[1] << 8);
+          const h = hdr[2] | (hdr[3] << 8);
+          seq = hdr[4] | (hdr[5] << 8) | (hdr[6] << 16) | (hdr[7] << 24);
+          if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+            imgData = null;
+          }
+          if (!imgData) imgData = ctx.createImageData(w, h);
+          const pixels = new Uint8Array(buf, 8);
+          imgData.data.set(pixels);
+          ctx.putImageData(imgData, 0, 0);
+        } catch (e) {
+          await new Promise(r => setTimeout(r, 500));
+        }
+      }
+    }
+    fetchLoop();
+    return { stop: function() { running = false; } };
+  }
+  const depthStream = startRawStream('/depth.raw', depthCanvas, depthCtx);
+  let colorStream = null;
+  if (colorCanvas && colorCanvas.style.display !== 'none') {
+    colorStream = startRawStream('/color.raw', colorCanvas, colorCtx);
+  }
+
+  // Mode: 0=No Dots, 1=Dots Only, 2=Dots+Pitches, 3=Dots+Sound
+  let currentMode = 0;
+  let evtSource = null;
+  let activeTones = new Map();
+  let audioCtx = null;
+
+  const keySelect = document.getElementById('keySelect');
+  const scaleSelect = document.getElementById('scaleSelect');
+  const decaySlider = document.getElementById('decaySlider');
+  const decayValSpan = document.getElementById('decayVal');
+  decaySlider.addEventListener('input', function() {
+    decayValSpan.textContent = (decaySlider.value / 10).toFixed(1) + ' s';
+  });
+  decaySlider.addEventListener('change', function() {
+    fetch('/soundsettings?soundDecay=' + decaySlider.value);
+  });
+  const releaseSlider = document.getElementById('releaseSlider');
+  const releaseValSpan = document.getElementById('releaseVal');
+  releaseSlider.addEventListener('input', function() {
+    releaseValSpan.textContent = (releaseSlider.value / 10).toFixed(1) + ' s';
+  });
+  releaseSlider.addEventListener('change', function() {
+    fetch('/soundsettings?soundRelease=' + releaseSlider.value);
+  });
+  const moveThreshSlider = document.getElementById('moveThreshSlider');
+  const moveThreshValSpan = document.getElementById('moveThreshVal');
+  moveThreshSlider.addEventListener('input', function() {
+    const v = parseInt(moveThreshSlider.value);
+    moveThreshValSpan.textContent = v === 0 ? 'off' : v + ' mm';
+  });
+  moveThreshSlider.addEventListener('change', function() {
+    fetch('/soundsettings?soundMoveThresh=' + moveThreshSlider.value);
+  });
+  const quantizeSelect = document.getElementById('quantizeSelect');
+  const tempoSlider = document.getElementById('tempoSlider');
+  const tempoValSpan = document.getElementById('tempoVal');
+  tempoSlider.addEventListener('input', function() {
+    tempoValSpan.textContent = tempoSlider.value + ' bpm';
+  });
+  tempoSlider.addEventListener('change', function() {
+    fetch('/soundsettings?soundTempo=' + tempoSlider.value);
+  });
+  let pendingTones = new Map();
+  const noteNames = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  const scales = {
+    chromatic:   [0,1,2,3,4,5,6,7,8,9,10,11],
+    major:       [0,2,4,5,7,9,11],
+    minor:       [0,2,3,5,7,8,10],
+    pentatonic:  [0,2,4,7,9],
+    blues:       [0,3,5,6,7,10],
+    lydian:      [0,2,4,6,7,9,11],
+    dorian:      [0,2,3,5,7,9,10],
+    mixolydian:  [0,2,4,5,7,9,10],
+    fifths:      [0,7],
+    wholetone:   [0,2,4,6,8,10]
+  };
+
+  function startTone(freq, blobId, cx, cy) {
+    if (!audioCtx) audioCtx = new AudioContext();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    const decay = decaySlider.value / 10;
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    g.gain.setValueAtTime(0.3, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + decay);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start();
+    activeTones.set(blobId, {osc: osc, gain: g, startTime: audioCtx.currentTime, cx: cx, cy: cy});
+  }
+
+  function cancelPending(blobId) {
+    const p = pendingTones.get(blobId);
+    if (p) { clearTimeout(p); pendingTones.delete(blobId); }
+  }
+
+  function stopTone(blobId) {
+    cancelPending(blobId);
+    const t = activeTones.get(blobId);
+    if (!t) return;
+    const rel = Math.max(0.01, releaseSlider.value / 10);
+    t.gain.gain.cancelScheduledValues(audioCtx.currentTime);
+    t.gain.gain.setValueAtTime(t.gain.gain.value, audioCtx.currentTime);
+    t.gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + rel);
+    t.osc.stop(audioCtx.currentTime + rel + 0.01);
+    activeTones.delete(blobId);
+  }
+
+  function stopAllTones() {
+    for (const id of pendingTones.keys()) cancelPending(id);
+    for (const id of activeTones.keys()) stopTone(id);
+  }
+
+  function quantizeToNote(freq) {
+    const key = parseInt(keySelect.value);
+    const si = scales[scaleSelect.value] || scales.chromatic;
+    const mf = 12 * Math.log2(freq / 440) + 69;
+    let bestMidi = Math.round(mf);
+    let bestDist = Infinity;
+    const oct = Math.floor(mf / 12);
+    for (let o = oct - 2; o <= oct + 2; o++) {
+      for (const iv of si) {
+        const m = o * 12 + key + iv;
+        const d = Math.abs(m - mf);
+        if (d < bestDist) { bestDist = d; bestMidi = m; }
+      }
+    }
+    const f = 440 * Math.pow(2, (bestMidi - 69) / 12);
+    const name = noteNames[((bestMidi % 12) + 12) % 12] + (Math.floor(bestMidi / 12) - 1);
+    return { freq: f, name: name };
+  }
+
+  function triggerTone(b, j, label) {
+    const ratio = 1.0 - (b.cx / j.w);
+    const rawFreq = 261.63 * Math.pow(2, 2.0 * ratio);
+    let freq = rawFreq;
+    let info = '';
+    if (currentMode === 2) {
+      const q = quantizeToNote(rawFreq);
+      freq = q.freq;
+      info = ' note=' + q.name;
+    }
+    const qVal = parseFloat(quantizeSelect.value);
+    if (qVal > 0) {
+      const bpm = parseInt(tempoSlider.value);
+      const beatSec = 60.0 / bpm * qVal / 4;
+      const now = performance.now() / 1000;
+      const nextBeat = Math.ceil(now / beatSec) * beatSec;
+      const delayMs = Math.max(0, (nextBeat - now) * 1000);
+      cancelPending(b.id);
+      const fq = freq;
+      const cx = b.cx;
+      const cy = b.cy;
+      const bid = b.id;
+      console.log(label + ' id=' + bid + ' Mode=' + currentMode + ' raw=' + rawFreq.toFixed(2) + ' played=' + fq.toFixed(2) + info + ' qDelay=' + delayMs.toFixed(0) + 'ms');
+      const tid = setTimeout(function() {
+        pendingTones.delete(bid);
+        startTone(fq, bid, cx, cy);
+      }, delayMs);
+      pendingTones.set(b.id, tid);
+    } else {
+      console.log(label + ' id=' + b.id + ' Mode=' + currentMode + ' raw=' + rawFreq.toFixed(2) + ' played=' + freq.toFixed(2) + info);
+      startTone(freq, b.id, b.cx, b.cy);
+    }
+  }
+
+  function checkNewBlobs(j) {
+    if (!j.blobs || j.w <= 0) return;
+    const moveThresh = parseInt(moveThreshSlider.value);
+    const currentIds = new Set();
+    for (const b of j.blobs) {
+      currentIds.add(b.id);
+      const existing = activeTones.get(b.id);
+      if (!existing && !pendingTones.has(b.id)) {
+        triggerTone(b, j, 'START');
+      } else if (existing && moveThresh > 0) {
+        const dx = b.cx - existing.cx;
+        const dy = b.cy - existing.cy;
+        const pxDist = Math.sqrt(dx * dx + dy * dy);
+        const depth = b.avg > 0 ? b.avg : 500;
+        const mmDist = pxDist * depth / 640;
+        if (mmDist > moveThresh) {
+          stopTone(b.id);
+          triggerTone(b, j, 'MOVE');
+        }
+      }
+    }
+    for (const id of activeTones.keys()) {
+      if (!currentIds.has(id)) {
+        console.log('END id=' + id);
+        stopTone(id);
+      }
+    }
+    for (const id of pendingTones.keys()) {
+      if (!currentIds.has(id)) {
+        console.log('END(pending) id=' + id);
+        cancelPending(id);
+      }
+    }
+    if (audioCtx) {
+      const now = audioCtx.currentTime;
+      for (const [id, t] of activeTones) {
+        if (now - t.startTime > 5) {
+          console.log('TIMEOUT id=' + id);
+          stopTone(id);
+        }
+      }
+    }
+  }
+
+  function drawDots(j) {
+    if (j.w > 0 && j.h > 0) { dotsCanvas.width = j.w; dotsCanvas.height = j.h; }
+    dotsCtx.clearRect(0, 0, dotsCanvas.width, dotsCanvas.height);
+    if (!showDepthToggle.checked) {
+      dotsCtx.fillStyle = '#000';
+      dotsCtx.fillRect(0, 0, dotsCanvas.width, dotsCanvas.height);
+    }
+    if (j.blobs) {
+      for (const b of j.blobs) {
+        const r = Math.max(4, Math.min(20, Math.sqrt(b.px) / 2));
+        dotsCtx.beginPath();
+        dotsCtx.arc(b.cx, b.cy, r, 0, 2 * Math.PI);
+        dotsCtx.fillStyle = '#0f0';
+        dotsCtx.fill();
+      }
+    }
+  }
+
+  function onSseMessage(e) {
+    const j = JSON.parse(e.data);
+    drawDots(j);
+    if (currentMode >= 2) checkNewBlobs(j);
+  }
+
+  function startDotsStream() {
+    depthCanvas.style.display = showDepthToggle.checked ? '' : 'none';
+    dotsCanvas.style.display = '';
+    stopAllTones();
+    evtSource = new EventSource('/events');
+    evtSource.onmessage = onSseMessage;
+  }
+
+  function stopDotsStream() {
+    depthCanvas.style.display = '';
+    dotsCanvas.style.display = 'none';
+    if (evtSource) { evtSource.close(); evtSource = null; }
+    stopAllTones();
+  }
+
+  showDepthToggle.addEventListener('change', function() {
+    if (currentMode >= 1) {
+      depthCanvas.style.display = showDepthToggle.checked ? '' : 'none';
+    }
+    fetch('/soundsettings?showDepth=' + (showDepthToggle.checked ? '1' : '0'));
+  });
+
+  keySelect.addEventListener('change', function() {
+    fetch('/soundsettings?soundKey=' + keySelect.value);
+  });
+  scaleSelect.addEventListener('change', function() {
+    fetch('/soundsettings?soundScale=' + scaleSelect.value);
+  });
+  quantizeSelect.addEventListener('change', function() {
+    fetch('/soundsettings?soundQuantize=' + quantizeSelect.value);
+  });
+
+  modeSelect.addEventListener('change', function() {
+    const newMode = parseInt(modeSelect.value);
+    const wasDots = currentMode >= 1;
+    const isDots = newMode >= 1;
+    currentMode = newMode;
+    if (isDots && !wasDots) {
+      if (newMode >= 2 && !audioCtx) audioCtx = new AudioContext();
+      startDotsStream();
+    } else if (!isDots && wasDots) {
+      stopDotsStream();
+    } else if (isDots) {
+      if (newMode >= 2 && !audioCtx) audioCtx = new AudioContext();
+      stopAllTones();
+    }
+    fetch('/soundsettings?soundMode=' + modeSelect.value);
+  });
+
+  threshToggle.addEventListener('change', function() {
+    threshSlider.disabled = !threshToggle.checked;
+    fetch('/threshold?enabled=' + (threshToggle.checked ? '1' : '0'));
+  });
+  threshSlider.addEventListener('input', function() {
+    threshVal.textContent = threshSlider.value + ' mm';
+    fetch('/threshold?value=' + threshSlider.value);
+  });
+  dilateSlider.addEventListener('input', function() {
+    dilateVal.textContent = dilateSlider.value;
+    fetch('/threshold?dilate=' + dilateSlider.value);
+  });
+  blobToggle.addEventListener('change', function() {
+    fetch('/blobdetect?enabled=' + (blobToggle.checked ? '1' : '0'));
+  });
+  blobSlider.addEventListener('input', function() {
+    blobVal.textContent = blobSlider.value + ' px';
+    fetch('/blobdetect?maxsize=' + blobSlider.value);
+  });
+  minBlobSlider.addEventListener('input', function() {
+    minBlobVal.textContent = minBlobSlider.value + ' px';
+    fetch('/blobdetect?minsize=' + minBlobSlider.value);
+  });
 
   resolutionSelect.addEventListener('change', function() {
     showRestart();
@@ -287,7 +847,7 @@ static const std::string kOrbbecScript1 = R"HTML(
   });
 )HTML";
 
-static const std::string kOrbbecScript2 = R"HTML(
+static const std::string kHtmlScript2 = R"HTML(
   // Device property helpers
   function setDev(params) { fetch('/deviceprops?' + params); }
   function setDevRestart(params) { showRestart(); fetch('/deviceprops?' + params); }
@@ -367,7 +927,7 @@ static const std::string kOrbbecScript2 = R"HTML(
   });
 )HTML";
 
-static const std::string kOrbbecScript3 = R"HTML(
+static const std::string kHtmlScript3 = R"HTML(
   // Depth exposure
   const depthAEToggle = document.getElementById('depthAEToggle');
   const depthExpSlider = document.getElementById('depthExpSlider');
@@ -441,7 +1001,7 @@ static const std::string kOrbbecScript3 = R"HTML(
   });
 )HTML";
 
-static const std::string kOrbbecScript4 = R"HTML(
+static const std::string kHtmlScript4 = R"HTML(
   // Color white balance
   const colorAWBToggle = document.getElementById('colorAWBToggle');
   const colorWBSlider = document.getElementById('colorWBSlider');
@@ -489,15 +1049,49 @@ static const std::string kOrbbecScript4 = R"HTML(
   });
 )HTML";
 
-static const std::string kOrbbecScript5 = R"HTML(
-  // Orbbec: fetch camera config
+static const std::string kHtmlScript5 = R"HTML(
+  // Fetch initial settings
+  fetch('/threshold').then(r=>r.json()).then(j => {
+    threshToggle.checked = j.enabled;
+    threshSlider.value = j.threshold;
+    threshSlider.disabled = !j.enabled;
+    threshVal.textContent = j.threshold + ' mm';
+    dilateSlider.value = j.dilate;
+    dilateVal.textContent = j.dilate;
+  });
+
+  fetch('/blobdetect').then(r=>r.json()).then(j => {
+    blobToggle.checked = j.enabled;
+    blobSlider.value = j.maxsize;
+    blobVal.textContent = j.maxsize + ' px';
+    minBlobSlider.value = j.minsize;
+    minBlobVal.textContent = j.minsize + ' px';
+  });
+
   fetch('/cameraconfig').then(r=>r.json()).then(j => {
     resolutionSelect.value = j.resolution;
     camFpsSlider.value = j.fps;
     camFpsVal.textContent = j.fps + ' fps';
   });
 
-  // Orbbec: fetch device capabilities and apply to UI
+  fetch('/soundsettings').then(r=>r.json()).then(function(d) {
+    modeSelect.value = d.soundMode;
+    keySelect.value = d.soundKey;
+    scaleSelect.value = d.soundScale;
+    decaySlider.value = d.soundDecay;
+    decayValSpan.textContent = (d.soundDecay / 10).toFixed(1) + ' s';
+    releaseSlider.value = d.soundRelease;
+    releaseValSpan.textContent = (d.soundRelease / 10).toFixed(1) + ' s';
+    moveThreshSlider.value = d.soundMoveThresh;
+    moveThreshValSpan.textContent = d.soundMoveThresh === 0 ? 'off' : d.soundMoveThresh + ' mm';
+    quantizeSelect.value = d.soundQuantize;
+    tempoSlider.value = d.soundTempo;
+    tempoValSpan.textContent = d.soundTempo + ' bpm';
+    showDepthToggle.checked = d.showDepth;
+    modeSelect.dispatchEvent(new Event('change'));
+  });
+
+  // Fetch device capabilities and apply to UI
   fetch('/devicecaps').then(r=>r.json()).then(caps => {
     function applyRange(slider, valSpan, range, suffix) {
       if (!range || !range.supported) return;
@@ -508,6 +1102,11 @@ static const std::string kOrbbecScript5 = R"HTML(
     function hideIf(id, show) {
       var el = document.getElementById(id);
       if (el && !show) el.classList.add('unsupported');
+    }
+
+    // Display device info
+    if (caps.connectionType) {
+      document.getElementById('usbInfo').textContent = caps.connectionType;
     }
 
     // Hide unsupported sections
@@ -561,8 +1160,10 @@ static const std::string kOrbbecScript5 = R"HTML(
       dispRange.value = caps.disparityRange.cur;
     }
   });
+)HTML";
 
-  // Orbbec: fetch current device property values
+static const std::string kHtmlScript6 = R"HTML(
+  // Fetch current device property values
   fetch('/deviceprops').then(r=>r.json()).then(d => {
     speckleToggle.checked = d.speckleEnable;
     speckleSize.value = d.speckleMaxSize;
@@ -618,6 +1219,16 @@ static const std::string kOrbbecScript5 = R"HTML(
     colorGammaVal.textContent = d.colorGamma;
     if (d.disparityRange > 0) dispRange.value = d.disparityRange;
   });
+
+  const fpsDisplay = document.getElementById('fpsDisplay');
+  function refreshFps() {
+    fetch('/fps').then(r=>r.json()).then(j => { fpsDisplay.textContent = j.fps.toFixed(1) + ' fps'; });
+  }
+  setInterval(refreshFps, 1000);
+  refreshFps();
+</script>
+</body>
+</html>
 )HTML";
 
 // ---- WebServer implementation ----
@@ -735,16 +1346,16 @@ void WebServer::saveSettings() {
     std::string sScale, sQuantize;
     { std::lock_guard<std::mutex> lock(devSettingsMtx_); ds = devSettings_; sScale = soundScale_; sQuantize = soundQuantize_; }
 
-    std::string json = "{\n"
-        + saveSharedSettingsJson(thresholdMm_.load(), thresholdEnabled_.load(),
-            dilateIterations_.load(), blobDetectEnabled_.load(),
-            maxBlobPixels_.load(), minBlobPixels_.load(), cameraFps_.load(),
-            soundMode_.load(), soundKey_.load(), sScale,
-            soundDecay_.load(), soundRelease_.load(), soundMoveThresh_.load(),
-            sQuantize, soundVolume_.load(), soundTempo_.load(), showDepth_.load())
-        + ",\n"
-        // Platform-specific fields
+    std::string json =
+        std::string("{\n"
+        "  \"thresholdMm\": ") + std::to_string(thresholdMm_.load()) + ",\n"
+        "  \"thresholdEnabled\": " + (thresholdEnabled_.load() ? "true" : "false") + ",\n"
+        "  \"dilateIterations\": " + std::to_string(dilateIterations_.load()) + ",\n"
+        "  \"blobDetectEnabled\": " + (blobDetectEnabled_.load() ? "true" : "false") + ",\n"
+        "  \"maxBlobPixels\": " + std::to_string(maxBlobPixels_.load()) + ",\n"
+        "  \"minBlobPixels\": " + std::to_string(minBlobPixels_.load()) + ",\n"
         "  \"depthResolution\": " + std::to_string(depthResolution_.load()) + ",\n"
+        "  \"cameraFps\": " + std::to_string(cameraFps_.load()) + ",\n"
         "  \"thresholdFilterEnable\": " + (pp.thresholdFilterEnable ? "true" : "false") + ",\n"
         "  \"thresholdFilterMin\": " + std::to_string(pp.thresholdFilterMin) + ",\n"
         "  \"thresholdFilterMax\": " + std::to_string(pp.thresholdFilterMax) + ",\n"
@@ -779,10 +1390,73 @@ void WebServer::saveSettings() {
         "  \"colorSharpness\": " + std::to_string(ds.colorSharpness) + ",\n"
         "  \"colorSaturation\": " + std::to_string(ds.colorSaturation) + ",\n"
         "  \"colorContrast\": " + std::to_string(ds.colorContrast) + ",\n"
-        "  \"colorGamma\": " + std::to_string(ds.colorGamma) + "\n"
+        "  \"colorGamma\": " + std::to_string(ds.colorGamma) + ",\n"
+        // Sound / UI settings
+        "  \"soundMode\": " + std::to_string(soundMode_.load()) + ",\n"
+        "  \"soundKey\": " + std::to_string(soundKey_.load()) + ",\n"
+        "  \"soundScale\": \"" + sScale + "\",\n"
+        "  \"soundDecay\": " + std::to_string(soundDecay_.load()) + ",\n"
+        "  \"soundRelease\": " + std::to_string(soundRelease_.load()) + ",\n"
+        "  \"soundMoveThresh\": " + std::to_string(soundMoveThresh_.load()) + ",\n"
+        "  \"soundQuantize\": \"" + sQuantize + "\",\n"
+        "  \"soundTempo\": " + std::to_string(soundTempo_.load()) + ",\n"
+        "  \"showDepth\": " + (showDepth_.load() ? "true" : "false") + "\n"
         "}\n";
 
-    writeSettingsFile(json);
+    std::ofstream tmp("settings.json.tmp");
+    if (!tmp) { std::cerr << "Failed to write settings.json.tmp" << std::endl; return; }
+    tmp << json;
+    tmp.close();
+    std::remove("settings.json");
+    std::rename("settings.json.tmp", "settings.json");
+}
+
+// Simple helper: find "key": in text and extract the value (int or bool)
+static bool jsonInt(const std::string& text, const std::string& key, int& out) {
+    std::string needle = "\"" + key + "\":";
+    auto pos = text.find(needle);
+    if (pos == std::string::npos) return false;
+    pos += needle.size();
+    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t')) pos++;
+    if (pos >= text.size()) return false;
+    bool negative = false;
+    if (text[pos] == '-') { negative = true; pos++; }
+    if (pos >= text.size() || !std::isdigit(static_cast<unsigned char>(text[pos]))) return false;
+    int val = 0;
+    while (pos < text.size() && std::isdigit(static_cast<unsigned char>(text[pos]))) {
+        val = val * 10 + (text[pos] - '0');
+        pos++;
+    }
+    out = negative ? -val : val;
+    return true;
+}
+
+static bool jsonBool(const std::string& text, const std::string& key, bool& out) {
+    std::string needle = "\"" + key + "\":";
+    auto pos = text.find(needle);
+    if (pos == std::string::npos) return false;
+    pos += needle.size();
+    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t')) pos++;
+    if (pos >= text.size()) return false;
+    if (text.compare(pos, 4, "true") == 0) { out = true; return true; }
+    if (text.compare(pos, 5, "false") == 0) { out = false; return true; }
+    return false;
+}
+
+static bool jsonString(const std::string& text, const std::string& key, std::string& out) {
+    std::string needle = "\"" + key + "\":";
+    auto pos = text.find(needle);
+    if (pos == std::string::npos) return false;
+    pos += needle.size();
+    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t')) pos++;
+    if (pos >= text.size() || text[pos] != '"') return false;
+    pos++; // skip opening quote
+    std::string result;
+    while (pos < text.size() && text[pos] != '"') {
+        result += text[pos++];
+    }
+    out = result;
+    return true;
 }
 
 void WebServer::loadSettings() {
@@ -793,16 +1467,16 @@ void WebServer::loadSettings() {
                       std::istreambuf_iterator<char>());
     file.close();
 
-    // Load shared settings (threshold, blob, sound)
-    loadSharedSettings(text, thresholdMm_, thresholdEnabled_, dilateIterations_,
-        blobDetectEnabled_, maxBlobPixels_, minBlobPixels_, cameraFps_,
-        soundMode_, soundKey_, soundDecay_, soundRelease_, soundMoveThresh_,
-        soundVolume_, soundTempo_, showDepth_);
-
     int iv; bool bv; std::string sv;
+    if (jsonInt(text, "thresholdMm", iv)) thresholdMm_.store(iv);
+    if (jsonBool(text, "thresholdEnabled", bv)) thresholdEnabled_.store(bv);
+    if (jsonInt(text, "dilateIterations", iv)) dilateIterations_.store(iv);
+    if (jsonBool(text, "blobDetectEnabled", bv)) blobDetectEnabled_.store(bv);
+    if (jsonInt(text, "maxBlobPixels", iv)) maxBlobPixels_.store(iv);
+    if (jsonInt(text, "minBlobPixels", iv)) minBlobPixels_.store(iv);
     if (jsonInt(text, "depthResolution", iv)) depthResolution_.store(iv);
+    if (jsonInt(text, "cameraFps", iv)) cameraFps_.store(iv);
 
-    // Platform-specific: post-proc
     {
         std::lock_guard<std::mutex> lock(postProcMtx_);
         if (jsonBool(text, "thresholdFilterEnable", bv)) postProc_.thresholdFilterEnable = bv;
@@ -810,7 +1484,6 @@ void WebServer::loadSettings() {
         if (jsonInt(text, "thresholdFilterMax", iv)) postProc_.thresholdFilterMax = iv;
     }
 
-    // Platform-specific: device settings + sound strings
     {
         std::lock_guard<std::mutex> lock(devSettingsMtx_);
         if (jsonBool(text, "speckleEnable", bv)) devSettings_.speckleEnable = bv;
@@ -844,43 +1517,76 @@ void WebServer::loadSettings() {
         if (jsonInt(text, "colorSaturation", iv)) devSettings_.colorSaturation = iv;
         if (jsonInt(text, "colorContrast", iv)) devSettings_.colorContrast = iv;
         if (jsonInt(text, "colorGamma", iv)) devSettings_.colorGamma = iv;
+        // Sound / UI settings (strings guarded by this mutex)
         if (jsonString(text, "soundScale", sv)) soundScale_ = sv;
         if (jsonString(text, "soundQuantize", sv)) soundQuantize_ = sv;
     }
 
+    if (jsonInt(text, "soundMode", iv)) soundMode_.store(iv);
+    if (jsonInt(text, "soundKey", iv)) soundKey_.store(iv);
+    if (jsonInt(text, "soundDecay", iv)) soundDecay_.store(iv);
+    if (jsonInt(text, "soundRelease", iv)) soundRelease_.store(iv);
+    if (jsonInt(text, "soundMoveThresh", iv)) soundMoveThresh_.store(iv);
+    if (jsonInt(text, "soundTempo", iv)) soundTempo_.store(iv);
+    if (jsonBool(text, "showDepth", bv)) showDepth_.store(bv);
+
     std::cout << "Loaded settings from settings.json" << std::endl;
+}
+
+std::vector<uint8_t> WebServer::makeBmp(const uint8_t* bgr, int width, int height) {
+    int rowBytes = width * 3;
+    int rowPadding = (4 - (rowBytes % 4)) % 4;
+    int paddedRow = rowBytes + rowPadding;
+    int imageSize = paddedRow * height;
+    int fileSize = 54 + imageSize;
+
+    std::vector<uint8_t> bmp(fileSize, 0);
+
+    bmp[0] = 'B'; bmp[1] = 'M';
+    std::memcpy(&bmp[2], &fileSize, 4);
+    int dataOffset = 54;
+    std::memcpy(&bmp[10], &dataOffset, 4);
+
+    int infoSize = 40;
+    std::memcpy(&bmp[14], &infoSize, 4);
+    std::memcpy(&bmp[18], &width, 4);
+    std::memcpy(&bmp[22], &height, 4);
+    uint16_t planes = 1;
+    std::memcpy(&bmp[26], &planes, 2);
+    uint16_t bpp = 24;
+    std::memcpy(&bmp[28], &bpp, 2);
+    std::memcpy(&bmp[34], &imageSize, 4);
+
+    uint8_t* dst = bmp.data() + 54;
+    for (int y = height - 1; y >= 0; y--) {
+        const uint8_t* srcRow = bgr + y * rowBytes;
+        std::memcpy(dst, srcRow, rowBytes);
+        dst += rowBytes;
+        for (int p = 0; p < rowPadding; p++) *dst++ = 0;
+    }
+
+    return bmp;
 }
 
 void WebServer::run() {
     httplib::Server svr;
 
-    // Build full HTML page from shared + Orbbec-specific parts
-    std::string fullHtml = "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
-        "<title>DepthPalette (Orbbec)</title>\n<style>"
-        + kSharedCss +
-        "</style>\n</head>\n<body>"
-        + kSharedHelpOverlay
-        + "\n<h1>DepthPalette (Orbbec)</h1>\n"
-        + kSharedControls
-        + kOrbbecControls2 + kOrbbecControls3 + kOrbbecControls4
-        + kOrbbecControls5 + kOrbbecControls6
-        + kSharedImages
-        + "\n<script>\n"
-        + kSharedSoundJs
-        + kSharedHandlersJs
-        + kOrbbecScript1 + kOrbbecScript2 + kOrbbecScript3
-        + kOrbbecScript4 + kOrbbecScript5
-        + kSharedInitJs
-        + "\n</script>\n</body>\n</html>";
+    // Build full HTML page
+    std::string fullHtml = kHtmlHead + kHtmlControls1 + kHtmlControls2 +
+                           kHtmlControls3 + kHtmlControls4 + kHtmlControls5 +
+                           kHtmlControls6 + kHtmlImages +
+                           kHtmlScript1 + kHtmlScript2 + kHtmlScript3 +
+                           kHtmlScript4 + kHtmlScript5 + kHtmlScript6;
 
     // GET / — HTML page (hide color image if color stream is disabled)
     svr.Get("/", [this, &fullHtml](const httplib::Request&, httplib::Response& res) {
         std::string html = fullHtml;
         if (!colorEnabled_) {
-            std::string target = "<img id=\"colorImg\" src=\"/color.mjpeg\" alt=\"Color\">";
+            std::string target = "<canvas id=\"colorCanvas\"";
             auto pos = html.find(target);
-            if (pos != std::string::npos)
-                html.replace(pos, target.size(), "");
+            if (pos != std::string::npos) {
+                html.insert(pos + 8, " style=\"display:none\"");
+            }
             // Hide color controls section
             std::string target2 = "id=\"colorControlsSection\"";
             auto pos2 = html.find(target2);
@@ -935,7 +1641,102 @@ void WebServer::run() {
                         "image/bmp");
     });
 
-    // GET /depth.mjpeg — MJPEG stream of depth frames
+    // GET /depth.raw — binary frame: 8-byte header (u16 width, u16 height, u32 seq) + RGBA pixels
+    svr.Get("/depth.raw", [this](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Access-Control-Allow-Origin", "*");
+        // If client sends ?seq=N, block until depthSeq_ > N
+        int clientSeq = 0;
+        if (req.has_param("seq")) clientSeq = std::stoi(req.get_param_value("seq"));
+        {
+            std::unique_lock<std::mutex> lock(frameMtx_);
+            depthCv_.wait_for(lock, std::chrono::seconds(2),
+                [&] { return depthSeq_ > clientSeq || !running_; });
+        }
+        std::vector<uint8_t> pixels;
+        int w, h, seq;
+        {
+            std::lock_guard<std::mutex> lock(frameMtx_);
+            if (depthBgr_.empty()) {
+                res.status = 204;
+                return;
+            }
+            w = depthW_;
+            h = depthH_;
+            seq = depthSeq_;
+            pixels = depthBgr_;
+        }
+        // Build response: 8-byte header + RGBA data
+        size_t npix = static_cast<size_t>(w) * h;
+        std::string body;
+        body.resize(8 + npix * 4);
+        auto* hdr = reinterpret_cast<uint8_t*>(&body[0]);
+        hdr[0] = static_cast<uint8_t>(w & 0xFF);
+        hdr[1] = static_cast<uint8_t>((w >> 8) & 0xFF);
+        hdr[2] = static_cast<uint8_t>(h & 0xFF);
+        hdr[3] = static_cast<uint8_t>((h >> 8) & 0xFF);
+        hdr[4] = static_cast<uint8_t>(seq & 0xFF);
+        hdr[5] = static_cast<uint8_t>((seq >> 8) & 0xFF);
+        hdr[6] = static_cast<uint8_t>((seq >> 16) & 0xFF);
+        hdr[7] = static_cast<uint8_t>((seq >> 24) & 0xFF);
+        // Convert BGR to RGBA
+        auto* dst = reinterpret_cast<uint8_t*>(&body[8]);
+        for (size_t i = 0; i < npix; i++) {
+            dst[i * 4 + 0] = pixels[i * 3 + 2]; // R
+            dst[i * 4 + 1] = pixels[i * 3 + 1]; // G
+            dst[i * 4 + 2] = pixels[i * 3 + 0]; // B
+            dst[i * 4 + 3] = 255;                // A
+        }
+        res.set_content(body, "application/octet-stream");
+    });
+
+    // GET /color.raw — binary frame: same format as depth.raw
+    svr.Get("/color.raw", [this](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Access-Control-Allow-Origin", "*");
+        int clientSeq = 0;
+        if (req.has_param("seq")) clientSeq = std::stoi(req.get_param_value("seq"));
+        {
+            std::unique_lock<std::mutex> lock(frameMtx_);
+            colorCv_.wait_for(lock, std::chrono::seconds(2),
+                [&] { return colorSeq_ > clientSeq || !running_; });
+        }
+        std::vector<uint8_t> pixels;
+        int w, h, seq;
+        {
+            std::lock_guard<std::mutex> lock(frameMtx_);
+            if (colorBgr_.empty()) {
+                res.status = 204;
+                return;
+            }
+            w = colorW_;
+            h = colorH_;
+            seq = colorSeq_;
+            pixels = colorBgr_;
+        }
+        size_t npix = static_cast<size_t>(w) * h;
+        std::string body;
+        body.resize(8 + npix * 4);
+        auto* hdr = reinterpret_cast<uint8_t*>(&body[0]);
+        hdr[0] = static_cast<uint8_t>(w & 0xFF);
+        hdr[1] = static_cast<uint8_t>((w >> 8) & 0xFF);
+        hdr[2] = static_cast<uint8_t>(h & 0xFF);
+        hdr[3] = static_cast<uint8_t>((h >> 8) & 0xFF);
+        hdr[4] = static_cast<uint8_t>(seq & 0xFF);
+        hdr[5] = static_cast<uint8_t>((seq >> 8) & 0xFF);
+        hdr[6] = static_cast<uint8_t>((seq >> 16) & 0xFF);
+        hdr[7] = static_cast<uint8_t>((seq >> 24) & 0xFF);
+        auto* dst = reinterpret_cast<uint8_t*>(&body[8]);
+        for (size_t i = 0; i < npix; i++) {
+            dst[i * 4 + 0] = pixels[i * 3 + 2];
+            dst[i * 4 + 1] = pixels[i * 3 + 1];
+            dst[i * 4 + 2] = pixels[i * 3 + 0];
+            dst[i * 4 + 3] = 255;
+        }
+        res.set_content(body, "application/octet-stream");
+    });
+
+    // GET /depth.mjpeg — MJPEG stream of depth frames (fallback)
     svr.Get("/depth.mjpeg", [this](const httplib::Request&, httplib::Response& res) {
         res.set_header("Cache-Control", "no-cache");
         res.set_chunked_content_provider(
@@ -1137,7 +1938,13 @@ void WebServer::run() {
             if (i > 0) json += ",";
             json += "\"" + caps.workModes[i] + "\"";
         }
-        json += "]}";
+        json += "],";
+
+        json += "\"connectionType\":\"" + caps.connectionType + "\",";
+        json += "\"deviceName\":\"" + caps.deviceName + "\",";
+        json += "\"firmwareVersion\":\"" + caps.firmwareVersion + "\",";
+        json += "\"serialNumber\":\"" + caps.serialNumber + "\"";
+        json += "}";
 
         res.set_content(json, "application/json");
     });
@@ -1297,11 +2104,6 @@ void WebServer::run() {
             soundQuantize_ = req.get_param_value("soundQuantize");
             changed = true;
         }
-        if (req.has_param("soundVolume")) {
-            int v = std::stoi(req.get_param_value("soundVolume"));
-            if (v < 0) v = 0; if (v > 100) v = 100;
-            soundVolume_.store(v); changed = true;
-        }
         if (req.has_param("soundTempo")) {
             int v = std::stoi(req.get_param_value("soundTempo"));
             if (v < 60) v = 60; if (v > 240) v = 240;
@@ -1322,7 +2124,6 @@ void WebServer::run() {
             + ",\"soundRelease\":" + std::to_string(soundRelease_.load())
             + ",\"soundMoveThresh\":" + std::to_string(soundMoveThresh_.load())
             + ",\"soundQuantize\":\"" + sQuantize + "\""
-            + ",\"soundVolume\":" + std::to_string(soundVolume_.load())
             + ",\"soundTempo\":" + std::to_string(soundTempo_.load())
             + ",\"showDepth\":" + (showDepth_.load() ? "true" : "false")
             + "}";
@@ -1365,6 +2166,6 @@ void WebServer::run() {
             });
     });
 
-    std::cout << "Web server starting on http://0.0.0.0:8080" << std::endl;
-    svr.listen("0.0.0.0", 8080);
+    std::cout << "Web server starting on http://127.0.0.1:8080" << std::endl;
+    svr.listen("127.0.0.1", 8080);
 }

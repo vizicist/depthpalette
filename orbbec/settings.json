@@ -1,5 +1,5 @@
 {
-  "thresholdMm": 470,
+  "thresholdMm": 250,
   "thresholdEnabled": true,
   "dilateIterations": 0,
   "blobDetectEnabled": true,
@@ -48,7 +48,6 @@
   "soundRelease": 32,
   "soundMoveThresh": 19,
   "soundQuantize": "0.5",
-  "soundVolume": 4,
   "soundTempo": 120,
   "showDepth": true
 }

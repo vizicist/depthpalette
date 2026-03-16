@@ -123,6 +123,12 @@ struct DeviceCaps {
     // Available depth work modes (presets)
     std::vector<std::string> workModes;
     std::string currentWorkMode;
+
+    // Device info
+    std::string connectionType;  // e.g. "USB2.1", "USB3.0"
+    std::string deviceName;
+    std::string firmwareVersion;
+    std::string serialNumber;
 };
 
 class WebServer {
@@ -168,6 +174,9 @@ public:
 
 private:
     void run();
+
+    // Build a 24-bit BMP from a top-down packed BGR buffer.
+    static std::vector<uint8_t> makeBmp(const uint8_t* bgr, int width, int height);
 
     std::atomic<int>& thresholdMm_;
     std::atomic<bool>& thresholdEnabled_;

@@ -491,6 +491,14 @@ PostProcSettings WebServer::getPostProcSettings() {
     return postProc_;
 }
 
+void WebServer::setDeviceInfo(const std::string& connectionType, const std::string& deviceName,
+                              const std::string& mxId) {
+    std::lock_guard<std::mutex> lock(postProcMtx_);
+    connectionType_ = connectionType;
+    deviceName_ = deviceName;
+    mxId_ = mxId;
+}
+
 void WebServer::saveSettings() {
     PostProcSettings pp;
     std::string sScale, sQuantize;
@@ -606,11 +614,11 @@ void WebServer::run() {
 
     // Compose full HTML page from shared + Luxonis-specific parts
     std::string fullHtml = "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
-        "<title>DepthPalette</title>\n<style>"
+        "<title>DepthPalette (Luxonis)</title>\n<style>"
         + kSharedCss +
         "</style>\n</head>\n<body>"
         + kSharedHelpOverlay
-        + "\n<h1>DepthPalette</h1>\n"
+        + "\n<h1>DepthPalette (Luxonis)</h1>\n"
         + kSharedControls
         + kLuxonisControls
         + kSharedImages
@@ -1126,6 +1134,16 @@ void WebServer::run() {
         res.set_content("{\"fps\":" + fpsStr + "}", "application/json");
     });
 
+    // GET /deviceinfo — device info (USB speed, name, MX ID)
+    svr.Get("/deviceinfo", [this](const httplib::Request&, httplib::Response& res) {
+        std::string connType, devName, mxId;
+        { std::lock_guard<std::mutex> lock(postProcMtx_); connType = connectionType_; devName = deviceName_; mxId = mxId_; }
+        std::string json = "{\"connectionType\":\"" + connType + "\""
+                         + ",\"deviceName\":\"" + devName + "\""
+                         + ",\"mxId\":\"" + mxId + "\"}";
+        res.set_content(json, "application/json");
+    });
+
     // GET /blobs — current blob positions as JSON
     svr.Get("/blobs", [this](const httplib::Request&, httplib::Response& res) {
         std::string json;
@@ -1135,6 +1153,80 @@ void WebServer::run() {
         }
         if (json.empty()) json = "{\"w\":0,\"h\":0,\"blobs\":[]}";
         res.set_content(json, "application/json");
+    });
+
+    // GET /depth.raw — binary frame: 8-byte header (u16 width, u16 height, u32 seq) + RGBA pixels
+    svr.Get("/depth.raw", [this](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Access-Control-Allow-Origin", "*");
+        int clientSeq = 0;
+        if (req.has_param("seq")) clientSeq = std::stoi(req.get_param_value("seq"));
+        {
+            std::unique_lock<std::mutex> lock(frameMtx_);
+            depthCv_.wait_for(lock, std::chrono::seconds(2),
+                [&] { return depthSeq_ > clientSeq || !running_; });
+        }
+        std::vector<uint8_t> pixels;
+        int w, h, seq;
+        {
+            std::lock_guard<std::mutex> lock(frameMtx_);
+            if (depthBgr_.empty()) { res.status = 204; return; }
+            w = depthW_; h = depthH_; seq = depthSeq_;
+            pixels = depthBgr_;
+        }
+        size_t npix = static_cast<size_t>(w) * h;
+        std::string body;
+        body.resize(8 + npix * 4);
+        auto* hdr = reinterpret_cast<uint8_t*>(&body[0]);
+        hdr[0] = static_cast<uint8_t>(w & 0xFF); hdr[1] = static_cast<uint8_t>((w >> 8) & 0xFF);
+        hdr[2] = static_cast<uint8_t>(h & 0xFF); hdr[3] = static_cast<uint8_t>((h >> 8) & 0xFF);
+        hdr[4] = static_cast<uint8_t>(seq & 0xFF); hdr[5] = static_cast<uint8_t>((seq >> 8) & 0xFF);
+        hdr[6] = static_cast<uint8_t>((seq >> 16) & 0xFF); hdr[7] = static_cast<uint8_t>((seq >> 24) & 0xFF);
+        auto* dst = reinterpret_cast<uint8_t*>(&body[8]);
+        for (size_t i = 0; i < npix; i++) {
+            dst[i * 4 + 0] = pixels[i * 3 + 2]; // R
+            dst[i * 4 + 1] = pixels[i * 3 + 1]; // G
+            dst[i * 4 + 2] = pixels[i * 3 + 0]; // B
+            dst[i * 4 + 3] = 255;                // A
+        }
+        res.set_content(body, "application/octet-stream");
+    });
+
+    // GET /color.raw — binary frame: same format as depth.raw
+    svr.Get("/color.raw", [this](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Access-Control-Allow-Origin", "*");
+        int clientSeq = 0;
+        if (req.has_param("seq")) clientSeq = std::stoi(req.get_param_value("seq"));
+        {
+            std::unique_lock<std::mutex> lock(frameMtx_);
+            colorCv_.wait_for(lock, std::chrono::seconds(2),
+                [&] { return colorSeq_ > clientSeq || !running_; });
+        }
+        std::vector<uint8_t> pixels;
+        int w, h, seq;
+        {
+            std::lock_guard<std::mutex> lock(frameMtx_);
+            if (colorBgr_.empty()) { res.status = 204; return; }
+            w = colorW_; h = colorH_; seq = colorSeq_;
+            pixels = colorBgr_;
+        }
+        size_t npix = static_cast<size_t>(w) * h;
+        std::string body;
+        body.resize(8 + npix * 4);
+        auto* hdr = reinterpret_cast<uint8_t*>(&body[0]);
+        hdr[0] = static_cast<uint8_t>(w & 0xFF); hdr[1] = static_cast<uint8_t>((w >> 8) & 0xFF);
+        hdr[2] = static_cast<uint8_t>(h & 0xFF); hdr[3] = static_cast<uint8_t>((h >> 8) & 0xFF);
+        hdr[4] = static_cast<uint8_t>(seq & 0xFF); hdr[5] = static_cast<uint8_t>((seq >> 8) & 0xFF);
+        hdr[6] = static_cast<uint8_t>((seq >> 16) & 0xFF); hdr[7] = static_cast<uint8_t>((seq >> 24) & 0xFF);
+        auto* dst = reinterpret_cast<uint8_t*>(&body[8]);
+        for (size_t i = 0; i < npix; i++) {
+            dst[i * 4 + 0] = pixels[i * 3 + 2];
+            dst[i * 4 + 1] = pixels[i * 3 + 1];
+            dst[i * 4 + 2] = pixels[i * 3 + 0];
+            dst[i * 4 + 3] = 255;
+        }
+        res.set_content(body, "application/octet-stream");
     });
 
     // GET /events — SSE stream of blob/cursor updates

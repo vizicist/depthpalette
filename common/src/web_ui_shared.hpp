@@ -181,6 +181,7 @@ inline const std::string kSharedControls = R"HTML(
   </div>
   <div class="sep"></div>
   <span id="fpsDisplay" class="fps">-- fps</span>
+  <span id="usbInfo" class="fps" style="margin-left:12px"></span>
 </div>
 )HTML";
 
@@ -577,4 +578,11 @@ inline const std::string kSharedInitJs = R"HTML(
   }
   setInterval(refreshFps, 1000);
   refreshFps();
+
+  // Device info (USB version etc.)
+  fetch('/deviceinfo').then(r=>r.json()).then(d => {
+    if (d.connectionType) {
+      document.getElementById('usbInfo').textContent = d.connectionType;
+    }
+  }).catch(function(){});
 )HTML";

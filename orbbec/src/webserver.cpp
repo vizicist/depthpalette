@@ -242,6 +242,7 @@ static const std::string kHtmlControls2 = R"HTML(
   </span>
   <span id="restartNote" class="restart-note"></span>
   <span id="depthStatus" class="restart-note" role="status"></span>
+  <label><input id="colorStreamToggle" type="checkbox"> Color streaming</label>
 </div>
 )HTML";
 
@@ -459,7 +460,7 @@ static const std::string kHtmlControls6 = R"HTML(
 
 static const std::string kHtmlImages = R"HTML(
 <div class="images">
-  <canvas id="colorCanvas" width="640" height="480"></canvas>
+  <canvas id="colorCanvas" width="640" height="480" style="display:none"></canvas>
   <div class="depth-wrap">
     <canvas id="depthCanvas" width="640" height="480"></canvas>
     <canvas id="dotsCanvas" style="display:none"></canvas>
@@ -513,12 +514,14 @@ static const std::string kHtmlScript1 = R"HTML(
     let seq = 0;
     let running = true;
     let imgData = null;
+    const controller = new AbortController();
     async function fetchLoop() {
       while (running) {
         try {
-          const resp = await fetch(url + '?seq=' + seq);
+          const resp = await fetch(url + '?seq=' + seq, {signal: controller.signal});
           if (resp.status === 204) { await new Promise(r => setTimeout(r, 100)); continue; }
           const buf = await resp.arrayBuffer();
+          if (!running) return;
           if (buf.byteLength < 8) continue;
           const hdr = new Uint8Array(buf, 0, 8);
           const w = hdr[0] | (hdr[1] << 8);
@@ -534,18 +537,39 @@ static const std::string kHtmlScript1 = R"HTML(
           imgData.data.set(pixels);
           ctx.putImageData(imgData, 0, 0);
         } catch (e) {
+          if (!running) return;
           await new Promise(r => setTimeout(r, 500));
         }
       }
     }
     fetchLoop();
-    return { stop: function() { running = false; } };
+    return { stop: function() { running = false; controller.abort(); } };
   }
   const depthStream = startRawStream('/depth.raw', depthCanvas, depthCtx);
   let colorStream = null;
-  if (colorCanvas && colorCanvas.style.display !== 'none') {
-    colorStream = startRawStream('/color.raw', colorCanvas, colorCtx);
+  const colorStreamToggle = document.getElementById('colorStreamToggle');
+  function applyColorState(enabled) {
+    colorStreamToggle.checked = enabled;
+    colorCanvas.style.display = enabled ? '' : 'none';
+    document.getElementById('colorControlsSection').style.display = enabled ? '' : 'none';
+    if (enabled && !colorStream) colorStream = startRawStream('/color.raw', colorCanvas, colorCtx);
+    if (!enabled && colorStream) {
+      colorStream.stop();
+      colorStream = null;
+      colorCtx.clearRect(0, 0, colorCanvas.width, colorCanvas.height);
+    }
   }
+  colorStreamToggle.addEventListener('change', async function() {
+    colorStreamToggle.disabled = true;
+    try {
+      const response = await fetch('/cameraconfig?color=' + (colorStreamToggle.checked ? '1' : '0'));
+      if (!response.ok) throw new Error('Color change failed');
+      applyColorState((await response.json()).colorEnabled);
+      showRestart();
+    } catch (e) {
+      restartNote.textContent = 'Could not change color streaming. Try again.';
+    } finally { colorStreamToggle.disabled = false; }
+  });
 
   // Mode: 0=No Dots, 1=Dots Only, 2=Dots+Pitches, 3=Dots+Sound
   let currentMode = 0;
@@ -1070,6 +1094,7 @@ static const std::string kHtmlScript5 = R"HTML(
   });
 
   fetch('/cameraconfig').then(r=>r.json()).then(j => {
+    applyColorState(j.colorEnabled);
     resolutionSelect.value = j.resolution;
     camFpsSlider.value = j.fps;
     camFpsVal.textContent = j.fps + ' fps';
@@ -1224,6 +1249,7 @@ static const std::string kHtmlScript6 = R"HTML(
   const fpsDisplay = document.getElementById('fpsDisplay');
   function refreshFps() {
     fetch('/fps').then(r=>r.json()).then(j => {
+      if (!colorStreamToggle.disabled) applyColorState(j.colorEnabled);
       fpsDisplay.textContent = j.fps.toFixed(1) + ' fps';
       const status = document.getElementById('depthStatus');
       if (!j.width) { status.textContent = 'Waiting for camera frames...'; return; }
@@ -1294,6 +1320,7 @@ void WebServer::stop() {
 void WebServer::updateColorFrame(const uint8_t* bgr, int width, int height) {
     {
         std::lock_guard<std::mutex> lock(frameMtx_);
+        if (!colorEnabled_.load()) return;
         size_t sz = static_cast<size_t>(width) * height * 3;
         colorBgr_.resize(sz);
         std::memcpy(colorBgr_.data(), bgr, sz);
@@ -1339,6 +1366,14 @@ DeviceSettings WebServer::getDeviceSettings() {
 void WebServer::setDeviceCaps(const DeviceCaps& caps) {
     std::lock_guard<std::mutex> lock(devSettingsMtx_);
     devCaps_ = caps;
+    auto resolve = [](int& value, PropertyRange& range) {
+        value = resolveColorSetting(value, range);
+        if (range.supported) range.cur = value;
+    };
+    resolve(devSettings_.colorSharpness, devCaps_.colorSharpness);
+    resolve(devSettings_.colorSaturation, devCaps_.colorSaturation);
+    resolve(devSettings_.colorContrast, devCaps_.colorContrast);
+    resolve(devSettings_.colorGamma, devCaps_.colorGamma);
 }
 
 // Helper: serialize a PropertyRange to JSON
@@ -1591,29 +1626,10 @@ void WebServer::run() {
                            kHtmlScript1 + kHtmlScript2 + kHtmlScript3 +
                            kHtmlScript4 + kHtmlScript5 + kHtmlScript6;
 
-    // GET / — HTML page (hide color image if color stream is disabled)
-    svr.Get("/", [this, &fullHtml](const httplib::Request&, httplib::Response& res) {
-        std::string html = fullHtml;
-        if (!colorEnabled_) {
-            std::string target = "<canvas id=\"colorCanvas\"";
-            auto pos = html.find(target);
-            if (pos != std::string::npos) {
-                html.insert(pos + 8, " style=\"display:none\"");
-            }
-            // Hide color controls section
-            std::string target2 = "id=\"colorControlsSection\"";
-            auto pos2 = html.find(target2);
-            if (pos2 != std::string::npos) {
-                // Find the div start
-                auto divStart = html.rfind("<div", pos2);
-                if (divStart != std::string::npos) {
-                    html.insert(divStart + 4, " style=\"display:none\"");
-                }
-            }
-        }
-        res.set_content(html, "text/html");
+    // Color visibility follows the live camera configuration in the browser.
+    svr.Get("/", [&fullHtml](const httplib::Request&, httplib::Response& res) {
+        res.set_content(fullHtml, "text/html");
     });
-
     // GET /frame.bmp — thresholded depth frame
     svr.Get("/frame.bmp", [this](const httplib::Request&, httplib::Response& res) {
         std::vector<uint8_t> pixels;
@@ -1883,6 +1899,21 @@ void WebServer::run() {
     // GET /cameraconfig — get or set camera configuration (resolution, fps)
     svr.Get("/cameraconfig", [this](const httplib::Request& req, httplib::Response& res) {
         bool changed = false;
+        if (req.has_param("color")) {
+            const auto value = req.get_param_value("color");
+            if (value != "0" && value != "1") { res.status = 400; return; }
+            const bool enabled = value == "1";
+            {
+                std::lock_guard<std::mutex> lock(frameMtx_);
+                if (colorEnabled_.exchange(enabled) != enabled) {
+                    colorBgr_.clear();
+                    colorW_ = colorH_ = 0;
+                    ++colorSeq_;
+                    restartRequested_.store(true);
+                }
+            }
+            colorCv_.notify_all();
+        }
         if (req.has_param("resolution")) {
             int val = std::stoi(req.get_param_value("resolution"));
             if (val < 0) val = 0;
@@ -1903,7 +1934,8 @@ void WebServer::run() {
         int resolution = depthResolution_.load();
         int fps = cameraFps_.load();
         res.set_content("{\"resolution\":" + std::to_string(resolution) +
-                        ",\"fps\":" + std::to_string(fps) + "}",
+                        ",\"fps\":" + std::to_string(fps) +
+                        ",\"colorEnabled\":" + (colorEnabled_.load() ? "true" : "false") + "}",
                         "application/json");
     });
 
@@ -2149,9 +2181,10 @@ void WebServer::run() {
         char buf[256];
         std::snprintf(buf, sizeof(buf),
             "{\"fps\":%.1f,\"width\":%d,\"height\":%d,\"cameraFps\":%d,"
-            "\"validPixels\":%d,\"foregroundPixels\":%d,\"nearestMm\":%d}",
+            "\"validPixels\":%d,\"foregroundPixels\":%d,\"nearestMm\":%d,\"colorEnabled\":%s}",
             tenths / 10.0, activeWidth_, activeHeight_, activeCameraFps_,
-            depthStats_.validPixels, depthStats_.foregroundPixels, depthStats_.nearestMm);
+            depthStats_.validPixels, depthStats_.foregroundPixels, depthStats_.nearestMm,
+            colorEnabled_.load() ? "true" : "false");
         res.set_content(buf, "application/json");
     });
 

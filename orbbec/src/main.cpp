@@ -333,6 +333,7 @@ int main(int argc, char* argv[]) {
         g_restartRequested.store(false);
         g_configDirty.store(false);
         g_devicePropsDirty.store(false);
+        showColor = webServer.isColorEnabled();
         g_fpsTenths.store(0);
         webServer.updateDepthStatus(0, 0, 0, {});
 

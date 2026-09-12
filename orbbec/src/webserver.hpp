@@ -69,10 +69,11 @@ struct DeviceSettings {
     bool colorAutoWhiteBalance = true;
     int colorWhiteBalance = 4600;
     int colorBrightness = 0;
-    int colorSharpness = 0;
-    int colorSaturation = 0;
-    int colorContrast = 0;
-    int colorGamma = 0;
+    // -1 means use this camera's default; zero is a deliberate user setting.
+    int colorSharpness = -1;
+    int colorSaturation = -1;
+    int colorContrast = -1;
+    int colorGamma = -1;
 };
 
 // Range info for a single integer property
@@ -84,6 +85,12 @@ struct PropertyRange {
     int def = 0;
     int cur = 0;
 };
+
+inline int resolveColorSetting(int saved, const PropertyRange& range) {
+    if (!range.supported) return saved;
+    int value = saved < 0 ? range.def : saved;
+    return value < range.min ? range.min : (value > range.max ? range.max : value);
+}
 
 // Capabilities queried from the device at startup
 struct DeviceCaps {
@@ -151,6 +158,7 @@ public:
 
     // Start the HTTP server on a background thread (127.0.0.1:8080).
     void start();
+    bool isColorEnabled() const { return colorEnabled_.load(); }
 
     // Stop the server and join the thread.
     void stop();
@@ -237,7 +245,7 @@ private:
     std::string soundScale_{"chromatic"};   // guarded by devSettingsMtx_
     std::string soundQuantize_{"0"};        // guarded by devSettingsMtx_
 
-    bool colorEnabled_;
+    std::atomic<bool> colorEnabled_;
     std::thread thread_;
     std::atomic<bool> running_{false};
 };

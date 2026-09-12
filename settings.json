@@ -37,8 +37,8 @@
   "colorAutoWhiteBalance": true,
   "colorWhiteBalance": 4600,
   "colorBrightness": 0,
-  "colorSharpness": 0,
-  "colorSaturation": 0,
-  "colorContrast": 0,
-  "colorGamma": 0
+  "colorSharpness": -1,
+  "colorSaturation": -1,
+  "colorContrast": -1,
+  "colorGamma": -1
 }

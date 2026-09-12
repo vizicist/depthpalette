@@ -13,6 +13,12 @@ depth only; add `--window` for the native viewer. Stop with Ctrl+C when
 running in a terminal. Stop the program before switching cameras, then
 run it again. No camera-model flag is required.
 
+The **Color streaming** checkbox switches the actual color camera stream
+on or off during a session. It also hides/shows the color preview and controls,
+and stops browser color downloads while off. Switching briefly restarts the
+camera pipeline (including depth). `--color` sets the initial state each time
+the application launches; the checkbox does not change that startup option.
+
 The program selects an advertised Y16 depth profile and a supported RGB,
 BGR, MJPEG or YUYV color profile. Unsupported saved depth work modes are
 ignored. Depth values are converted using each frame's reported scale.
@@ -42,3 +48,10 @@ See the [Orbbec datasheet](https://www.orbbec.com/wp-content/uploads/2025/06/Gem
 
 Depth diagnostics regression check: build target `depthstats_test`, then run
 `build\bin\depthstats_test.exe`.
+
+`--color` displays the RGB camera stream. Saturation zero makes that stream
+greyscale; it is separate from the depth preview. Unspecified sharpness,
+saturation, contrast and gamma use the connected camera's defaults (`-1`
+in settings.json). Explicit saved values, including saturation zero, are
+preserved. The Gemini 335 reports defaults of 50, 64, 50 and 300 respectively.
+Run target `color_settings_test` to check default resolution and overrides.

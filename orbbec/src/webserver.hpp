@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include "depthstats.hpp"
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -158,6 +159,13 @@ public:
     void updateColorFrame(const uint8_t* bgr, int width, int height);
     void updateDepthFrame(const uint8_t* bgr, int width, int height);
     void updateBlobs(const std::string& json);
+    void updateDepthStatus(int width, int height, int cameraFps, const DepthStats& stats) {
+        std::lock_guard<std::mutex> lock(frameMtx_);
+        activeWidth_ = width;
+        activeHeight_ = height;
+        activeCameraFps_ = cameraFps;
+        depthStats_ = stats;
+    }
 
     // Read current post-processing settings (thread-safe copy).
     PostProcSettings getPostProcSettings();
@@ -192,6 +200,8 @@ private:
     std::atomic<bool>& devicePropsDirty_;
 
     std::mutex frameMtx_;
+    int activeWidth_ = 0, activeHeight_ = 0, activeCameraFps_ = 0;
+    DepthStats depthStats_;
     std::vector<uint8_t> colorBgr_;
     int colorW_ = 0;
     int colorH_ = 0;

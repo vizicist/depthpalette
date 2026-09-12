@@ -221,7 +221,7 @@ static const std::string kHtmlControls2 = R"HTML(
     </select>
   </label>
   <div class="sep"></div>
-  <label>Camera FPS<span class="help-btn" onclick="showHelp('Camera FPS','Sensor frame rate. Requires restart.')">?</span>:
+  <label>Requested FPS<span class="help-btn" onclick="showHelp('Camera FPS','Requested sensor frame rate. The active profile below shows the supported rate selected by the camera. Requires restart.')">?</span>:
     <input id="camFpsSlider" class="slider" type="range" min="1" max="60" step="1" value="30">
   </label>
   <span id="camFpsVal" class="val">30 fps</span>
@@ -241,6 +241,7 @@ static const std::string kHtmlControls2 = R"HTML(
     </label>
   </span>
   <span id="restartNote" class="restart-note"></span>
+  <span id="depthStatus" class="restart-note" role="status"></span>
 </div>
 )HTML";
 
@@ -1222,7 +1223,19 @@ static const std::string kHtmlScript6 = R"HTML(
 
   const fpsDisplay = document.getElementById('fpsDisplay');
   function refreshFps() {
-    fetch('/fps').then(r=>r.json()).then(j => { fpsDisplay.textContent = j.fps.toFixed(1) + ' fps'; });
+    fetch('/fps').then(r=>r.json()).then(j => {
+      fpsDisplay.textContent = j.fps.toFixed(1) + ' fps';
+      const status = document.getElementById('depthStatus');
+      if (!j.width) { status.textContent = 'Waiting for camera frames...'; return; }
+      let text = 'Active: ' + j.width + 'x' + j.height + ' @ ' + j.cameraFps + ' fps.';
+      if (!j.validPixels) {
+        text += ' No valid depth: check distance, camera position and depth settings.';
+      } else if (!j.foregroundPixels) {
+        text += ' No depth within the threshold; nearest valid depth is ' + j.nearestMm +
+          ' mm. Increase the threshold or use a lower resolution for closer objects.';
+      }
+      status.textContent = text;
+    }).catch(() => { document.getElementById('depthStatus').textContent = 'Camera server unavailable.'; });
   }
   setInterval(refreshFps, 1000);
   refreshFps();
@@ -2132,8 +2145,13 @@ void WebServer::run() {
 
     svr.Get("/fps", [this](const httplib::Request&, httplib::Response& res) {
         int tenths = fpsTenths_.load();
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "{\"fps\":%.1f}", tenths / 10.0);
+        std::lock_guard<std::mutex> lock(frameMtx_);
+        char buf[256];
+        std::snprintf(buf, sizeof(buf),
+            "{\"fps\":%.1f,\"width\":%d,\"height\":%d,\"cameraFps\":%d,"
+            "\"validPixels\":%d,\"foregroundPixels\":%d,\"nearestMm\":%d}",
+            tenths / 10.0, activeWidth_, activeHeight_, activeCameraFps_,
+            depthStats_.validPixels, depthStats_.foregroundPixels, depthStats_.nearestMm);
         res.set_content(buf, "application/json");
     });
 

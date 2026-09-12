@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -12,6 +13,7 @@
 #include "blobdetect.hpp"
 #include "blobtracker.hpp"
 #include "depthcolor.hpp"
+#include "colorstream.hpp"
 #ifdef VIEWER_LINUX
 #include "viewer_linux.hpp"
 #else
@@ -331,6 +333,8 @@ int main(int argc, char* argv[]) {
         g_restartRequested.store(false);
         g_configDirty.store(false);
         g_devicePropsDirty.store(false);
+        g_fpsTenths.store(0);
+        webServer.updateDepthStatus(0, 0, 0, {});
 
         int resIdx = g_depthResolution.load();
         int camFps = g_cameraFps.load();
@@ -346,6 +350,10 @@ int main(int argc, char* argv[]) {
         try {
 
         ob::Pipeline pipe;
+        auto connectedInfo = pipe.getDevice()->getDeviceInfo();
+        std::cout << "Camera: " << connectedInfo->getName()
+                  << " firmware=" << connectedInfo->getFirmwareVersion()
+                  << " connection=" << connectedInfo->getConnectionType() << std::endl;
 
         // Switch depth work mode before configuring streams (if requested)
         {
@@ -354,7 +362,14 @@ int main(int argc, char* argv[]) {
                 try {
                     auto device = pipe.getDevice();
                     auto currentMode = device->getCurrentDepthWorkMode();
-                    if (devSettings.depthWorkMode != currentMode.name) {
+                    auto modes = device->getDepthWorkModeList();
+                    bool supported = false;
+                    for (uint32_t i = 0; i < modes->getCount(); ++i)
+                        supported |= devSettings.depthWorkMode == modes->getOBDepthWorkMode(i).name;
+                    if (!supported) {
+                        std::cerr << "Ignoring saved depth work mode unavailable on this camera: "
+                                  << devSettings.depthWorkMode << std::endl;
+                    } else if (devSettings.depthWorkMode != currentMode.name) {
                         std::cout << "Switching depth work mode to: " << devSettings.depthWorkMode << std::endl;
                         device->switchDepthWorkMode(devSettings.depthWorkMode.c_str());
                     }
@@ -438,21 +453,22 @@ int main(int argc, char* argv[]) {
             camFps = vp->fps();
             config->enableStream(depthProfile);
         } else {
-            std::cerr << "No Y16 depth profile found, trying default..." << std::endl;
-            config->enableStream(OB_STREAM_DEPTH);
+            throw std::runtime_error("Camera has no supported Y16 depth profile");
         }
 
+        int colorW = 0, colorH = 0;
         if (showColor) {
             try {
-                config->enableVideoStream(OB_STREAM_COLOR, OB_WIDTH_ANY, OB_HEIGHT_ANY,
-                                          camFps, OB_FORMAT_RGB);
-            } catch (...) {
-                std::cerr << "Warning: could not enable color stream at requested fps, trying any" << std::endl;
-                try {
-                    config->enableStream(OB_STREAM_COLOR);
-                } catch (...) {
-                    std::cerr << "Warning: could not enable color stream" << std::endl;
-                }
+                auto profile = selectColorProfile(pipe.getStreamProfileList(OB_SENSOR_COLOR), camFps, reqW, reqH);
+                if (!profile) throw std::runtime_error("No RGB, BGR, MJPEG or YUYV color profile");
+                auto video = profile->as<ob::VideoStreamProfile>();
+                config->enableStream(profile);
+                colorW = video->getWidth();
+                colorH = video->getHeight();
+                std::cout << "Color: " << colorW << "x" << colorH << " @ " << video->fps()
+                          << "fps format=" << video->getFormat() << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: color disabled: " << e.what() << std::endl;
             }
         }
 
@@ -481,7 +497,11 @@ int main(int argc, char* argv[]) {
         // Wait for first depth frame
         std::cout << "Waiting for first frames..." << std::endl;
         std::shared_ptr<ob::FrameSet> firstFrameSet;
-        while (!firstFrameSet) {
+        auto firstFrameDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!firstFrameSet || !firstFrameSet->getFrame(OB_FRAME_DEPTH)) {
+            if (g_restartRequested.load() || g_configDirty.load() ||
+                std::chrono::steady_clock::now() >= firstFrameDeadline)
+                throw std::runtime_error("No depth frame received; restarting camera pipeline");
             firstFrameSet = pipe.waitForFrameset(1000);
         }
 
@@ -499,7 +519,6 @@ int main(int argc, char* argv[]) {
                   << " scale=" << depthScale << std::endl;
 
         // Color stream (optional)
-        int colorW = 0, colorH = 0;
         if (showColor) {
             auto firstColorRaw = firstFrameSet->getFrame(OB_FRAME_COLOR);
             if (firstColorRaw) {
@@ -525,9 +544,11 @@ int main(int argc, char* argv[]) {
 
         // Reusable buffers
         std::vector<uint8_t> colorBgr;
+        ob::FormatConvertFilter colorConverter;
         if (showColor && colorW > 0) colorBgr.resize(colorW * colorH * 3);
         std::vector<uint8_t> depthBgr(depthW * depthH * 3);
         std::vector<uint16_t> depthMm(depthW * depthH);  // depth in mm
+        auto nextDepthStatus = std::chrono::steady_clock::now();
 
         // Helper: convert raw depth to millimeters
         auto convertDepthToMm = [&](const uint16_t* raw, int count, float scale) {
@@ -538,6 +559,14 @@ int main(int argc, char* argv[]) {
                     float mm = raw[i] * scale;
                     depthMm[i] = (mm > 65535.0f) ? uint16_t(65535) : static_cast<uint16_t>(mm);
                 }
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= nextDepthStatus) {
+                const uint16_t threshold = g_thresholdEnabled.load()
+                    ? static_cast<uint16_t>(g_thresholdMm.load()) : uint16_t(65535);
+                webServer.updateDepthStatus(depthW, depthH, camFps,
+                    measureDepth(depthMm.data(), count, threshold));
+                nextDepthStatus = now + std::chrono::seconds(1);
             }
         };
 
@@ -560,9 +589,8 @@ int main(int argc, char* argv[]) {
                 auto firstColorRaw = firstFrameSet->getFrame(OB_FRAME_COLOR);
                 if (firstColorRaw) {
                     auto firstColor = firstColorRaw->as<ob::ColorFrame>();
-                    const auto* rgbData = reinterpret_cast<const uint8_t*>(firstColor->getData());
-                    packedRgbToPackedBgr(rgbData, colorW, colorH, colorBgr.data());
-                    if (showWeb) webServer.updateColorFrame(colorBgr.data(), colorW, colorH);
+                    if (convertColorToBgr(firstColor, colorConverter, colorBgr) && showWeb)
+                        webServer.updateColorFrame(colorBgr.data(), colorW, colorH);
                 }
             }
 
@@ -611,7 +639,7 @@ int main(int argc, char* argv[]) {
                 gotNewDepth = true;
                 auto depthFrame = depthRaw->as<ob::DepthFrame>();
                 const auto* rawData = reinterpret_cast<const uint16_t*>(depthFrame->getData());
-                convertDepthToMm(rawData, depthW * depthH, depthScale);
+                convertDepthToMm(rawData, depthW * depthH, depthFrame->getValueScale());
 
                 uint16_t thr = g_thresholdEnabled.load()
                     ? static_cast<uint16_t>(g_thresholdMm.load()) : uint16_t(65535);
@@ -664,11 +692,9 @@ int main(int argc, char* argv[]) {
             if (showColor && colorW > 0) {
                 auto colorRaw = frameSet->getFrame(OB_FRAME_COLOR);
                 if (colorRaw) {
-                    gotNewColor = true;
                     auto colorFrame = colorRaw->as<ob::ColorFrame>();
-                    const auto* rgbData = reinterpret_cast<const uint8_t*>(colorFrame->getData());
-                    packedRgbToPackedBgr(rgbData, colorW, colorH, colorBgr.data());
-                    if (showWeb) webServer.updateColorFrame(colorBgr.data(), colorW, colorH);
+                    gotNewColor = convertColorToBgr(colorFrame, colorConverter, colorBgr);
+                    if (gotNewColor && showWeb) webServer.updateColorFrame(colorBgr.data(), colorW, colorH);
                 }
             }
 

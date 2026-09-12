@@ -65,6 +65,16 @@ target_link_libraries(depthpalette
         httplib::httplib
 )
 
+# Explicit regression target; uses synthetic frames and needs no camera.
+add_executable(colorstream_test EXCLUDE_FROM_ALL tests/colorstream_test.cpp)
+add_executable(depthstats_test EXCLUDE_FROM_ALL tests/depthstats_test.cpp)
+target_include_directories(depthstats_test PRIVATE src)
+target_include_directories(colorstream_test PRIVATE src ../common/src)
+target_link_libraries(colorstream_test PRIVATE ob::OrbbecSDK)
+if(WIN32)
+    target_compile_definitions(colorstream_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
 # Copy any required DLLs next to the executable
 if(WIN32)
     add_custom_command(TARGET depthpalette POST_BUILD
